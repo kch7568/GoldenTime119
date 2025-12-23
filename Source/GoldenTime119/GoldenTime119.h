@@ -4,3 +4,4 @@
 
 #include "CoreMinimal.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogFire, Log, All);

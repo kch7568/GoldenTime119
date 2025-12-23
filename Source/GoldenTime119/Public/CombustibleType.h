@@ -1,15 +1,13 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CombustibleType.generated.h"
 
-/**
- * 
- */
-class GOLDENTIME119_API CombustibleType
+UENUM(BlueprintType)
+enum class ECombustibleType : uint8
 {
-public:
-	CombustibleType();
-	~CombustibleType();
+    Normal      UMETA(DisplayName = "Normal"),
+    Oil         UMETA(DisplayName = "Oil"),
+    Electric    UMETA(DisplayName = "Electric"),
+    Explosive   UMETA(DisplayName = "Explosive"),
 };
