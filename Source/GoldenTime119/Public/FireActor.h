@@ -7,11 +7,13 @@
 #include "RoomActor.h" // FFireRuntimeTuning
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/ParticleSystem.h"
+#include "Components/PointLightComponent.h"
 #include "FireActor.generated.h"
 
 class ARoomActor;
 class USceneComponent;
 class UCombustibleComponent;
+class UPointLightComponent;
 
 UCLASS()
 class GOLDENTIME119_API AFireActor : public AActor
@@ -109,4 +111,5 @@ private:
     void SpreadPressureToNeighbors(); // 주변 가연물에 “압력”만 전달
 
     bool ShouldExtinguish() const;
+
 };

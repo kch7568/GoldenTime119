@@ -109,6 +109,10 @@ void AFireActor::BeginPlay()
 void AFireActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+
+    // VFX 업데이트는 상태와 상관없이 항상 수행
+    UpdateVfx(DeltaSeconds);
+
     if (!bIsActive) return;
 
     if (ShouldExtinguish())
@@ -118,9 +122,8 @@ void AFireActor::Tick(float DeltaSeconds)
     }
 
     SpawnAge += DeltaSeconds;
-
     UpdateRuntimeFromRoom();
-    UpdateVfx(DeltaSeconds);
+
 
     InfluenceAcc += DeltaSeconds;
     if (InfluenceAcc >= InfluenceInterval)
@@ -180,20 +183,25 @@ void AFireActor::UpdateRuntimeFromRoom()
 {
     if (!IsValid(LinkedRoom)) return;
 
-    // FuelRatio는 “가연물” 권위
     float FuelRatio01 = 1.f;
+    float ExtinguishAlpha = 0.f;
     if (IsValid(LinkedCombustible))
+    {
         FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+        ExtinguishAlpha = LinkedCombustible->ExtinguishAlpha01;
+    }
 
     FFireRuntimeTuning T;
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    CurrentSpreadRadius = T.SpreadRadius;
+    // 물에 의해 진압 중이라면 확산 반경을 줄임
+    CurrentSpreadRadius = T.SpreadRadius * FMath::Lerp(1.f, 0.3f, ExtinguishAlpha);
     SpreadInterval = FMath::Max(0.05f, T.SpreadInterval);
 
-    // 강도는 BaseIntensity * (연료비율 기반 약화) 정도만 반영(취향)
-    EffectiveIntensity = BaseIntensity * (0.35f + 0.65f * FuelRatio01);
+    // 강도 역시 진압률에 따라 약화시켜 주변 가연물에 주는 압력을 줄임
+    float SuppressionMul = FMath::Lerp(1.f, 0.2f, ExtinguishAlpha);
+    EffectiveIntensity = BaseIntensity * (0.35f + 0.65f * FuelRatio01) * SuppressionMul;
     EffectiveIntensity = FMath::Max(0.f, EffectiveIntensity);
 }
 
@@ -301,42 +309,45 @@ void AFireActor::Extinguish()
     if (IsValid(LinkedRoom))
         LinkedRoom->UnregisterFire(FireID);
 
-    // 가연물 쪽 상태 내려주기
     if (IsValid(LinkedCombustible))
     {
         LinkedCombustible->bIsBurning = false;
         LinkedCombustible->ActiveFire = nullptr;
     }
 
-    Destroy();
+    // Strength01 파라미터를 통해 나이아가라 내부에서 조절
+
+    // 20초의 생명 주기
+    SetLifeSpan(20.0f);
 }
 
 void AFireActor::UpdateVfx(float DeltaSeconds)
 {
     if (!IsValid(FirePsc)) return;
 
-    float Fuel01 = 1.f;
-    if (IsValid(LinkedCombustible))
-        Fuel01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+    float TargetStrength01 = 0.f;
 
-    const float Int01 = FMath::Clamp(
-        EffectiveIntensity / FMath::Max(0.01f, BaseIntensity),
-        0.f, 2.f
-    );
+    // A. 살아있는 상태일 때의 강도 계산
+    if (bIsActive)
+    {
+        float Fuel01 = 1.f;
+        if (IsValid(LinkedCombustible))
+            Fuel01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
 
-    // 기본 화력(연료/강도 기반) 0..1
-    const float Raw01 = FMath::Clamp(0.65f * Fuel01 + 0.35f * (Int01 * 0.5f), 0.f, 1.f);
+        const float Int01 = FMath::Clamp(EffectiveIntensity / FMath::Max(0.01f, BaseIntensity), 0.f, 2.f);
+        const float Raw01 = FMath::Clamp(0.65f * Fuel01 + 0.35f * (Int01 * 0.5f), 0.f, 1.f);
+        const float Ramp01 = (IgniteRampSeconds <= 0.f) ? 1.f : FMath::Clamp(SpawnAge / IgniteRampSeconds, 0.f, 1.f);
 
-    // ★ 점화 램프(스폰 직후 0 -> 1)
-    const float Ramp01 = (IgniteRampSeconds <= 0.f)
-        ? 1.f
-        : FMath::Clamp(SpawnAge / IgniteRampSeconds, 0.f, 1.f);
+        TargetStrength01 = Raw01 * Ramp01;
+    }
+    else
+    {
+        // B. 소멸 중일 때 (Extinguish 호출 이후)
+        // 이미 생성된 Strength01을 0으로 빠르게 깎습니다.
+        TargetStrength01 = 0.0f;
+    }
 
-    const float TargetStrength01 = Raw01 * Ramp01;
-
-    // 부드럽게
-    Strength01 = FMath::FInterpTo(Strength01, TargetStrength01, DeltaSeconds, 6.0f);
-
-    // ★ 지정된 이름만 사용
+    // 부드럽게 보간 
+    Strength01 = FMath::FInterpTo(Strength01, TargetStrength01, DeltaSeconds, 1.0f);
     FirePsc->SetFloatParameter(TEXT("Strength01"), Strength01);
 }
