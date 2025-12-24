@@ -29,6 +29,10 @@ AFireActor::AFireActor()
 
     Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
     SetRootComponent(Root);
+
+    FirePsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("FirePSC"));
+    FirePsc->SetupAttachment(Root);
+    FirePsc->bAutoActivate = true;
 }
 
 void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
@@ -53,6 +57,8 @@ void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
 void AFireActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (FireTemplate) FirePsc->SetTemplate(FireTemplate);
 
     if (!bInitialized)
     {
@@ -103,20 +109,19 @@ void AFireActor::BeginPlay()
 void AFireActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
-
     if (!bIsActive) return;
 
     if (ShouldExtinguish())
     {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] Extinguish Fire=%s Id=%s"), *GetName(), *FireID.ToString());
         Extinguish();
         return;
     }
 
+    SpawnAge += DeltaSeconds;
+
     UpdateRuntimeFromRoom();
+    UpdateVfx(DeltaSeconds);
 
-
-    // 2) 룸에 영향
     InfluenceAcc += DeltaSeconds;
     if (InfluenceAcc >= InfluenceInterval)
     {
@@ -125,13 +130,11 @@ void AFireActor::Tick(float DeltaSeconds)
         SubmitInfluenceToRoom();
     }
 
-    // 3) 확산(압력 전달)
     SpreadAcc += DeltaSeconds;
     if (SpreadAcc >= SpreadInterval)
     {
         SpreadAcc = 0.f;
         SpreadPressureToNeighbors();
-        UE_LOG(LogFire, Log, TEXT("[Fire] SpreadApplied SourceFire=%s Id=%s"), *GetName(), *FireID.ToString());
     }
 }
 
@@ -306,4 +309,34 @@ void AFireActor::Extinguish()
     }
 
     Destroy();
+}
+
+void AFireActor::UpdateVfx(float DeltaSeconds)
+{
+    if (!IsValid(FirePsc)) return;
+
+    float Fuel01 = 1.f;
+    if (IsValid(LinkedCombustible))
+        Fuel01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+
+    const float Int01 = FMath::Clamp(
+        EffectiveIntensity / FMath::Max(0.01f, BaseIntensity),
+        0.f, 2.f
+    );
+
+    // 기본 화력(연료/강도 기반) 0..1
+    const float Raw01 = FMath::Clamp(0.65f * Fuel01 + 0.35f * (Int01 * 0.5f), 0.f, 1.f);
+
+    // ★ 점화 램프(스폰 직후 0 -> 1)
+    const float Ramp01 = (IgniteRampSeconds <= 0.f)
+        ? 1.f
+        : FMath::Clamp(SpawnAge / IgniteRampSeconds, 0.f, 1.f);
+
+    const float TargetStrength01 = Raw01 * Ramp01;
+
+    // 부드럽게
+    Strength01 = FMath::FInterpTo(Strength01, TargetStrength01, DeltaSeconds, 6.0f);
+
+    // ★ 지정된 이름만 사용
+    FirePsc->SetFloatParameter(TEXT("Strength01"), Strength01);
 }

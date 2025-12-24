@@ -16,15 +16,28 @@ void UCombustibleComponent::BeginPlay()
 {
     Super::BeginPlay();
 
-    // BP에서 FuelCurrent가 0으로 저장돼 있거나, 초기화 누락 방지
-    if (Fuel.FuelInitial <= 0.f)
-        Fuel.FuelInitial = 12.f;
-
-    if (Fuel.FuelCurrent <= 0.f)
-        Fuel.FuelCurrent = Fuel.FuelInitial;
-
     EnsureFuelInitialized();
-    // 룸 자동 연결을 원하면: Owner가 RoomBounds 안에 있을 때 Room이 Rescan/Overlap로 연결해줌
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
+
+    if (!SmokePsc)
+    {
+        SmokePsc = NewObject<UParticleSystemComponent>(Owner, TEXT("SmokePSC"));
+        SmokePsc->SetupAttachment(Owner->GetRootComponent());
+        SmokePsc->RegisterComponent();
+        SmokePsc->SetTemplate(SmokeTemplate);
+        SmokePsc->bAutoActivate = true;
+    }
+
+    if (!SteamPsc)
+    {
+        SteamPsc = NewObject<UParticleSystemComponent>(Owner, TEXT("SteamPSC"));
+        SteamPsc->SetupAttachment(Owner->GetRootComponent());
+        SteamPsc->RegisterComponent();
+        SteamPsc->SetTemplate(SteamTemplate);
+        SteamPsc->bAutoActivate = false;   // 물 닿을 때만
+        SteamPsc->DeactivateSystem();
+    }
 }
 
 void UCombustibleComponent::SetOwningRoom(ARoomActor* InRoom)
@@ -79,12 +92,82 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+    // 1) 점화 진행도 업데이트(불 붙기 전 포함)
     UpdateIgnitionProgress(DeltaTime);
+
+    // 2) 물에 의한 냉각/진압 적용
+    if (PendingWater01 > KINDA_SMALL_NUMBER)
+    {
+        // 불 붙기 전: 점화 진행도 감소(냉각)
+        Ignition.IgnitionProgress01 = FMath::Max<float>(
+            0.f,
+            Ignition.IgnitionProgress01 - PendingWater01 * WaterCoolPerSec * DeltaTime
+        );
+
+        // 불 붙은 상태: 서서히 소화(ExtinguishAlpha01 증가)
+        if (IsBurning())
+        {
+            ExtinguishAlpha01 = FMath::Clamp(
+                ExtinguishAlpha01 + PendingWater01 * WaterExtinguishPerSec * DeltaTime,
+                0.f, 1.f
+            );
+        }
+
+        // 물 입력 감쇠
+        PendingWater01 = FMath::Max<float>(
+            0.f,
+            PendingWater01 - WaterDecayPerSec * DeltaTime
+        );
+    }
+    else
+    {
+        // 물이 끊기면 소화 진행도는 천천히 복귀시킬지/유지할지 취향
+        ExtinguishAlpha01 = FMath::Max<float>(0.f, ExtinguishAlpha01 - 0.05f * DeltaTime);
+    }
+
+    // 3) 연기 알파(불 붙기 전 훈소 포함) -> Smoke01
+    const float t = FMath::GetMappedRangeValueClamped(
+        FVector2D(SmokeStartProgress, SmokeFullProgress),
+        FVector2D(0.f, 1.f),
+        Ignition.IgnitionProgress01
+    );
+    SmokeAlpha01 = FMath::FInterpTo(SmokeAlpha01, t, DeltaTime, 2.0f);
+
+    // === [NEW] Cascade 파라미터 주입 (지정된 이름만) ===
+    // Smoke01: 훈소/Progress 기반
+    if (IsValid(SmokePsc))
+    {
+        SmokePsc->SetFloatParameter(TEXT("Smoke01"), SmokeAlpha01);
+
+        // 0이면 꺼두고 싶으면(선택)
+        SmokePsc->SetFloatParameter(TEXT("Smoke01"), SmokeAlpha01);
+    }
+
+    // Steam01: 물 접촉 기반 (입력 있을 때만)
+    const float Steam01 = FMath::Clamp(PendingWater01, 0.f, 1.f);
+    if (IsValid(SteamPsc))
+    {
+        SteamPsc->SetFloatParameter(TEXT("Steam01"), Steam01);
+
+        if (Steam01 <= 0.01f) SteamPsc->DeactivateSystem();
+        else                  SteamPsc->ActivateSystem(true);
+    }
+    // === [/NEW] ===
+
+    // 4) 점화 시도
     TryIgnite();
 
-    // 연료가 0이 되면(또는 룸 산소 부족) 불이 꺼지는 건 FireActor가 먼저 Extinguish 호출하겠지만,
-    // 안전장치로 여기도 관찰 가능 (원하면 여기서도 소화 트리거 가능)
+    // 5) 소화 판정: ExtinguishAlpha01이 충분하면 FireActor에 “소화 요청”
+    if (IsBurning() && ExtinguishAlpha01 >= 1.f)
+    {
+        if (IsValid(ActiveFire))
+        {
+            ActiveFire->Extinguish(); // “서서히”의 끝에서 완전 소화
+        }
+        ExtinguishAlpha01 = 0.f;
+    }
 }
+
 
 void UCombustibleComponent::UpdateIgnitionProgress(float DeltaTime)
 {
@@ -94,32 +177,30 @@ void UCombustibleComponent::UpdateIgnitionProgress(float DeltaTime)
     PendingPressure = 0.f;
     PendingHeat = 0.f;
 
-    // 입력(임펄스) -> 진행도
-    const float InputImpulse = (PressureImpulse + HeatImpulse * 0.25f) * Ignition.Flammability;
+    const float InputImpulse =
+        (PressureImpulse + HeatImpulse * 0.25f) * Ignition.Flammability;
 
     if (InputImpulse > KINDA_SMALL_NUMBER)
     {
-        // ★중요: 임펄스는 이미 “한 번의 전달량”이라 DeltaTime을 곱하지 않는다
+        // DeltaTime 절대 곱하지 말 것
         Ignition.IgnitionProgress01 = FMath::Clamp(
-            Ignition.IgnitionProgress01 + InputImpulse * Ignition.IgnitionSpeed,
+            Ignition.IgnitionProgress01
+            + InputImpulse * Ignition.IgnitionSpeed,
             0.f, 1.25f
         );
     }
     else
     {
         // 감쇠만 시간 기반
-        if (Ignition.IgnitionDecayPerSec > 0.f)
-        {
-            Ignition.IgnitionProgress01 = FMath::Max(
-                0.f,
-                Ignition.IgnitionProgress01 - Ignition.IgnitionDecayPerSec * DeltaTime
-            );
-        }
+        Ignition.IgnitionProgress01 = FMath::Max(
+            0.f,
+            Ignition.IgnitionProgress01
+            - Ignition.IgnitionDecayPerSec * DeltaTime
+        );
     }
-
-    UE_LOG(LogComb, Warning, TEXT("[Comb] ProgUpdate Owner=%s Input=%.4f Prog=%.4f"),
-        *GetNameSafe(GetOwner()), InputImpulse, Ignition.IgnitionProgress01);
 }
+
+
 
 
 void UCombustibleComponent::TryIgnite()
@@ -207,4 +288,9 @@ void UCombustibleComponent::EnsureFuelInitialized()
 
     UE_LOG(LogComb, Warning, TEXT("[Comb] EnsureFuel Owner=%s Init %.2f->%.2f Cur %.2f->%.2f"),
         *GetNameSafe(GetOwner()), BeforeInit, Fuel.FuelInitial, BeforeCur, Fuel.FuelCurrent);
+}
+
+void UCombustibleComponent::AddWaterContact(float Amount01)
+{
+    PendingWater01 = FMath::Clamp(PendingWater01 + Amount01, 0.f, 1.5f);
 }

@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "CombustibleType.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "CombustibleComponent.generated.h"
 
 class ARoomActor;
@@ -74,8 +75,41 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Combustible|Fuel")
     void EnsureFuelInitialized();
 
+    UPROPERTY(VisibleAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystemComponent> SmokePsc = nullptr;
+
+    UPROPERTY(VisibleAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystemComponent> SteamPsc = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystem> SmokeTemplate = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystem> SteamTemplate = nullptr;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Fuel")
     FCombustibleFuelParams Fuel;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Smoke")
+    float SmokeStartProgress = 0.25f;     // 이 이상이면 연기 시작
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Smoke")
+    float SmokeFullProgress = 0.85f;     // 이쯤이면 연기 최대
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Suppression")
+    float WaterCoolPerSec = 0.35f;        // 물 입력 1.0일 때 초당 냉각량(진행도 감소)
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Suppression")
+    float WaterExtinguishPerSec = 0.25f;  // 불이 붙은 상태에서 물 입력 1.0일 때 초당 소화속도
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Combustible|Runtime")
+    float SmokeAlpha01 = 0.f;             // VFX로 보낼 값(0..1)
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Combustible|Runtime")
+    float ExtinguishAlpha01 = 0.f;        // 0..1 (1이면 완전 소화)
+
+    // 물(또는 소화약제) 입력: 0..1 정도로 누적해서 Tick에서 감쇠/적용
+    void AddWaterContact(float Amount01);
 
     // 현재 화재
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Combustible|Runtime")
@@ -123,6 +157,13 @@ private:
 
     // 디버그/추적
     float LastInputTime = 0.f;
+    
+    //물 
+    UPROPERTY(VisibleInstanceOnly, Category = "Combustible|Suppression")
+    float PendingWater01 = 0.f;
+
+    // 물 입력 감쇠(초당). 전역(static)로 두지 말고 멤버/상수로.
+    static constexpr float WaterDecayPerSec = 1.25f;
 
 private:
     bool CanIgniteNow() const;

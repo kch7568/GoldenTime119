@@ -5,6 +5,8 @@
 #include "GameFramework/Actor.h"
 #include "CombustibleType.h"
 #include "RoomActor.h" // FFireRuntimeTuning
+#include "Particles/ParticleSystemComponent.h"
+#include "Particles/ParticleSystem.h"
 #include "FireActor.generated.h"
 
 class ARoomActor;
@@ -49,6 +51,26 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Timing")
     float InfluenceInterval = 0.5f;
 
+    UPROPERTY(EditAnywhere, Category = "VFX")
+    float IgniteRampSeconds = 1.25f;
+
+    UPROPERTY(VisibleAnywhere, Category = "VFX")
+    float SpawnAge = 0.f;              // 스폰 후 경과
+
+    UPROPERTY(VisibleAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystemComponent> FirePsc = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "VFX")
+    TObjectPtr<UParticleSystem> FireTemplate = nullptr;
+
+    UPROPERTY(VisibleInstanceOnly, Category = "VFX")
+    float Strength01 = 1.f;
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|VFX")
+    float FireVfxScale01 = 0.f;
+
+    void UpdateVfx(float DeltaSeconds);
+
     // 스폰 파라미터(방어)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ExposeOnSpawn = true), Category = "Fire|Spawn")
     TObjectPtr<ARoomActor> SpawnRoom = nullptr;
@@ -76,6 +98,9 @@ private:
 
     bool bInitialized = false;
     bool bIsActive = false;
+
+    static constexpr float WaterDecayPerSec = 1.25f; // 물 입력은 금방 사라지게(취향)
+    float PendingWater01 = 0.f; // <- 클래스 멤버로 넣으세요 (private)
 
 private:
     void UpdateRuntimeFromRoom();
