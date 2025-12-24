@@ -79,6 +79,15 @@ void ARoomActor::BeginPlay()
     Debug_RescanCombustibles();
 
     UE_LOG(LogFire, Warning, TEXT("[Room] BeginPlay Room=%s Combustibles=%d"), *GetName(), Combustibles.Num());
+
+    UpdateRoomGeometryFromBounds();
+
+    NP.NeutralPlaneZ = CeilingZ - MaxNeutralPlaneFromCeiling;
+    NP.UpperSmoke01 = 0.f;
+    NP.UpperTempC = 25.f;
+
+    UE_LOG(LogFire, Warning, TEXT("[Room] BeginPlay Room=%s Combustibles=%d FloorZ=%.1f CeilingZ=%.1f"),
+        *GetName(), Combustibles.Num(), FloorZ, CeilingZ);
 }
 
 void ARoomActor::Tick(float DeltaSeconds)
@@ -86,6 +95,8 @@ void ARoomActor::Tick(float DeltaSeconds)
     Super::Tick(DeltaSeconds);
 
     ApplyAccumulators(DeltaSeconds);
+    if (bEnableNeutralPlane)
+        UpdateNeutralPlane(DeltaSeconds);
     UpdateRoomState();
     ResetAccumulators();
 }
@@ -444,4 +455,66 @@ AFireActor* ARoomActor::IgniteRandomCombustibleInRoom(bool bAllowElectric)
     if (!IsValid(Pick) || !IsValid(Pick->GetOwner())) return nullptr;
 
     return IgniteActor(Pick->GetOwner());
+}
+
+void ARoomActor::UpdateNeutralPlane(float DeltaSeconds)
+{
+    UpdateRoomGeometryFromBounds(); // 룸이 움직이지 않으면 BeginPlay 한 번만 해도 됨
+
+    const float RoomHeight = FMath::Max(1.f, CeilingZ - FloorZ);
+
+    // 1) UpperSmoke01 누적: AccSmoke 기반(이미 ApplyAccumulators에서 Smoke도 누적하지만,
+    //    중성대는 "층" 느낌이 중요해서 이번 프레임 생성량을 반영하는게 직관적)
+    //    - SmokeToUpperFillRate는 프로젝트 단위로 맞춰야 함.
+    float Add = AccSmoke * SmokeToUpperFillRate * DeltaSeconds;
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 + Add, 0.f, 1.f);
+
+    // 2) 환기에 의한 제거(문/창/배연/급기 등)
+    //    - Vent01 0..1
+    const float VentRemove = NP.Vent01 * VentSmokeRemoveRate * DeltaSeconds;
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - VentRemove, 0.f, 1.f);
+
+    // 3) 산소가 낮으면 연기/열 생성이 둔화되는 느낌(선택)
+    //    - O2가 낮아져 불이 죽기 시작하면 층도 안정/감소하는 느낌을 줌
+    const float O2Factor = FMath::Clamp(Oxygen / 1.0f, 0.f, 1.f);
+    const float Stability = FMath::Lerp(1.2f, 0.7f, O2Factor); // O2 낮을수록 UpperSmoke01 유지가 약해짐
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 * FMath::Pow(0.9995f, DeltaSeconds * 60.f * (2.f - Stability)), 0.f, 1.f);
+
+    // 4) NeutralPlane 목표 높이 계산
+    //    - UpperSmoke01 0이면 천장 바로 아래
+    //    - 1이면 바닥 근처(최소 높이 보장)
+    const float MinZ = FloorZ + MinNeutralPlaneFromFloor;
+    const float MaxZ = CeilingZ - MaxNeutralPlaneFromCeiling;
+
+    const float TargetZ = FMath::Lerp(MaxZ, MinZ, NP.UpperSmoke01);
+
+    // 5) 내려오는 속도/올라가는 속도를 다르게(체감 좋아짐)
+    const bool bGoingDown = (TargetZ < NP.NeutralPlaneZ);
+
+    const float Speed = bGoingDown
+        ? NeutralPlaneDropPerSec * (0.25f + 0.75f * NP.UpperSmoke01)   // 연기 많을수록 더 빨리 내려옴
+        : NeutralPlaneRisePerSec * (0.25f + 0.75f * NP.Vent01);        // 환기 많을수록 더 빨리 올라감
+
+    NP.NeutralPlaneZ = FMath::FInterpConstantTo(NP.NeutralPlaneZ, TargetZ, DeltaSeconds, Speed);
+
+    // clamp 안전
+    NP.NeutralPlaneZ = FMath::Clamp(NP.NeutralPlaneZ, MinZ, MaxZ);
+
+    // 6) 상층 온도(선택): Heat와 연동해서 Flashover 같은 조건에 사용 가능
+    //    여기선 단순히 Heat 누적을 약하게 반영
+    const float Heat01 = FMath::Clamp(Heat / 600.f, 0.f, 1.f); // 임시 기준
+    const float TempTarget = FMath::Lerp(25.f, 650.f, Heat01); // 임시
+    NP.UpperTempC = FMath::FInterpTo(NP.UpperTempC, TempTarget, DeltaSeconds, 0.25f);
+}
+
+void ARoomActor::UpdateRoomGeometryFromBounds()
+{
+    if (!IsValid(RoomBounds))
+        return;
+
+    const FVector Center = RoomBounds->GetComponentLocation();
+    const FVector Extent = RoomBounds->GetScaledBoxExtent(); // 월드 스케일 반영
+
+    FloorZ = Center.Z - Extent.Z;
+    CeilingZ = Center.Z + Extent.Z;
 }

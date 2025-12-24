@@ -56,6 +56,17 @@ struct FFireRuntimeTuning
     UPROPERTY(BlueprintReadOnly) float InfluenceScale = 1.f;
 };
 
+USTRUCT(BlueprintType)
+struct FNeutralPlaneState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly) float NeutralPlaneZ = 200.f;   // cm
+    UPROPERTY(BlueprintReadOnly) float UpperSmoke01 = 0.f;     // 0..1
+    UPROPERTY(BlueprintReadOnly) float UpperTempC = 25.f;    // 선택
+    UPROPERTY(BlueprintReadOnly) float Vent01 = 0.f;     // 0..1
+};
+
 // 타입별 정책(최소)
 USTRUCT(BlueprintType)
 struct FFirePolicy
@@ -122,6 +133,38 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Electric = 4;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Explosive = 12;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    bool bEnableNeutralPlane = true;
+
+    // 룸 높이/바닥 높이는 Box로부터 자동 계산 (cm)
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
+    float FloorZ = 0.f;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
+    float CeilingZ = 300.f;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
+    FNeutralPlaneState NP;
+
+    // 튜닝 파라미터
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float SmokeToUpperFillRate = 0.12f;   // Smoke -> UpperSmoke01 전환 비율
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float VentSmokeRemoveRate = 0.35f;    // 환기 시 UpperSmoke01 감소
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float NeutralPlaneDropPerSec = 90.f;  // UpperSmoke01이 높을수록 cm/s로 내려오는 속도
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float NeutralPlaneRisePerSec = 60.f;  // 환기/진압 등으로 올라가는 속도
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float MinNeutralPlaneFromFloor = 40.f; // cm (완전 바닥까지는 안 가게)
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
+    float MaxNeutralPlaneFromCeiling = 10.f; // cm (천장 바로 밑까지만)
+
     // ===== Events =====
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRoomFireEvent, AFireActor*, Fire);
     UPROPERTY(BlueprintAssignable, Category = "Room|Event") FRoomFireEvent OnFireStarted;
@@ -158,6 +201,12 @@ public:
 
     // BP 테스트 편의
     UFUNCTION(BlueprintCallable, Category = "Room|Test")
+    UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
+    FNeutralPlaneState GetNeutralPlane() const { return NP; }
+
+    // 문/창/배연 상태를 BP/코드에서 주입
+    UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
+    void SetVent01(float InVent01) { NP.Vent01 = FMath::Clamp(InVent01, 0.f, 1.f); }
     void Debug_RescanCombustibles(); // RoomBounds 내부에서 찾아서 등록
 
     UFUNCTION(BlueprintCallable, Category = "Room|Fire")
@@ -195,6 +244,9 @@ private:
     // RoomBounds 내부 판정(스케일 포함)
     static bool IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldPos);
 
+    void UpdateRoomGeometryFromBounds();
+    void UpdateNeutralPlane(float DeltaSeconds);
+
     // Overlap 이벤트(선택)
     UFUNCTION() void OnRoomBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
@@ -202,3 +254,4 @@ private:
     UFUNCTION() void OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 };
+
