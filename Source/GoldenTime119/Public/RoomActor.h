@@ -200,7 +200,6 @@ public:
     void GetCombustiblesInRoom(TArray<UCombustibleComponent*>& Out, bool bExcludeBurning = true) const;
 
     // BP 테스트 편의
-    UFUNCTION(BlueprintCallable, Category = "Room|Test")
     UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
     FNeutralPlaneState GetNeutralPlane() const { return NP; }
 
