@@ -1,15 +1,16 @@
-// ============================ CombustibleComponent.cpp ============================
 #include "CombustibleComponent.h"
 
 #include "RoomActor.h"
 #include "FireActor.h"
 #include "Engine/World.h"
+#include "GameFramework/Actor.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogComb, Log, All);
 
 UCombustibleComponent::UCombustibleComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
+    PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 void UCombustibleComponent::BeginPlay()
@@ -17,27 +18,172 @@ void UCombustibleComponent::BeginPlay()
     Super::BeginPlay();
 
     EnsureFuelInitialized();
+
     AActor* Owner = GetOwner();
-    if (!Owner) return;
+    if (!IsValid(Owner)) return;
 
-    if (!SmokePsc)
+    USceneComponent* RootComp = Owner->GetRootComponent();
+    if (!IsValid(RootComp)) return;
+
+    const FVector OwnerLocation = Owner->GetActorLocation();
+
+    UE_LOG(LogTemp, Error, TEXT("[Comb] === BeginPlay START === Owner=%s"), *GetNameSafe(Owner));
+    UE_LOG(LogTemp, Error, TEXT("[Comb] BEFORE - SteamTemplate=%s, SteamSound=%s"),
+        *GetNameSafe(SteamTemplate), *GetNameSafe(SteamSound));
+
+    EnsureComponentsCreated(Owner, RootComp);
+    ApplyTemplatesAndSounds();
+
+    UE_LOG(LogTemp, Error, TEXT("[Comb] AFTER - SteamPsc=%s, SteamAudio=%s"),
+        *GetNameSafe(SteamPsc), *GetNameSafe(SteamAudio));
+
+    if (IsValid(SteamPsc))
     {
-        SmokePsc = NewObject<UParticleSystemComponent>(Owner, TEXT("SmokePSC"));
-        SmokePsc->SetupAttachment(Owner->GetRootComponent());
-        SmokePsc->RegisterComponent();
+        UE_LOG(LogTemp, Error, TEXT("[Comb] SteamPsc->Template=%s"), *GetNameSafe(SteamPsc->Template));
+    }
+    if (IsValid(SteamAudio))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[Comb] SteamAudio->Sound=%s"), *GetNameSafe(SteamAudio->Sound));
+    }
+
+    if (!Owner->GetActorLocation().Equals(OwnerLocation, 1.f))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[Comb] Owner location shifted! Restoring..."));
+        Owner->SetActorLocation(OwnerLocation);
+    }
+
+    SetComponentTickEnabled(true);
+}
+
+void UCombustibleComponent::ApplyTemplatesAndSounds()
+{
+    if (IsValid(SmokePsc) && SmokeTemplate && SmokePsc->Template != SmokeTemplate)
+    {
         SmokePsc->SetTemplate(SmokeTemplate);
-        SmokePsc->bAutoActivate = true;
+        UE_LOG(LogTemp, Warning, TEXT("[Comb] SmokeTemplate applied: %s"), *GetNameSafe(SmokeTemplate));
     }
 
-    if (!SteamPsc)
+    if (IsValid(SteamPsc) && SteamTemplate && SteamPsc->Template != SteamTemplate)
     {
-        SteamPsc = NewObject<UParticleSystemComponent>(Owner, TEXT("SteamPSC"));
-        SteamPsc->SetupAttachment(Owner->GetRootComponent());
-        SteamPsc->RegisterComponent();
         SteamPsc->SetTemplate(SteamTemplate);
-        SteamPsc->bAutoActivate = false;   // 물 닿을 때만
-        SteamPsc->DeactivateSystem();
+        UE_LOG(LogTemp, Warning, TEXT("[Comb] SteamTemplate applied: %s"), *GetNameSafe(SteamTemplate));
     }
+
+    if (IsValid(SteamAudio) && SteamSound && SteamAudio->Sound != SteamSound)
+    {
+        SteamAudio->SetSound(SteamSound);
+        UE_LOG(LogTemp, Warning, TEXT("[Comb] SteamSound applied: %s"), *GetNameSafe(SteamSound));
+    }
+}
+
+void UCombustibleComponent::EnsureComponentsCreated(AActor* Owner, USceneComponent* RootComp)
+{
+    // Smoke PSC
+    if (!IsValid(SmokePsc))
+    {
+        SmokePsc = NewObject<UParticleSystemComponent>(Owner, UParticleSystemComponent::StaticClass(),
+            FName(*FString::Printf(TEXT("SmokePSC_%d"), FMath::Rand())));
+        if (SmokePsc)
+        {
+            SmokePsc->SetupAttachment(RootComp);
+            SmokePsc->bAutoActivate = true;
+            SmokePsc->RegisterComponent();
+            SmokePsc->SetRelativeLocation(FVector::ZeroVector);
+            if (SmokeTemplate)
+            {
+                SmokePsc->SetTemplate(SmokeTemplate);
+            }
+        }
+    }
+
+    // Steam PSC
+    if (!IsValid(SteamPsc))
+    {
+        SteamPsc = NewObject<UParticleSystemComponent>(Owner, UParticleSystemComponent::StaticClass(),
+            FName(*FString::Printf(TEXT("SteamPSC_%d"), FMath::Rand())));
+        if (SteamPsc)
+        {
+            SteamPsc->SetupAttachment(RootComp);
+            SteamPsc->bAutoActivate = false;
+            SteamPsc->RegisterComponent();
+            SteamPsc->SetRelativeLocation(FVector::ZeroVector);
+            SteamPsc->DeactivateSystem();
+            if (SteamTemplate)
+            {
+                SteamPsc->SetTemplate(SteamTemplate);
+            }
+        }
+    }
+
+    // Steam Audio
+    if (!IsValid(SteamAudio))
+    {
+        SteamAudio = NewObject<UAudioComponent>(Owner, UAudioComponent::StaticClass(),
+            FName(*FString::Printf(TEXT("SteamAudio_%d"), FMath::Rand())));
+        if (SteamAudio)
+        {
+            SteamAudio->SetupAttachment(RootComp);
+            SteamAudio->bAutoActivate = false;
+            SteamAudio->bStopWhenOwnerDestroyed = true;
+            SteamAudio->RegisterComponent();
+            SteamAudio->SetRelativeLocation(FVector::ZeroVector);
+            if (SteamSound)
+            {
+                SteamAudio->SetSound(SteamSound);
+            }
+        }
+    }
+}
+
+void UCombustibleComponent::OnComponentCreated()
+{
+    Super::OnComponentCreated();
+
+    // 컴포넌트가 처음 생성될 때 호출됨
+    bComponentsNeedRecreation = false;
+}
+
+void UCombustibleComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
+{
+    // 레벨 전환 시 컴포넌트가 파괴되면 플래그 설정
+    bComponentsNeedRecreation = true;
+
+    Super::OnComponentDestroyed(bDestroyingHierarchy);
+}
+
+void UCombustibleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    // 사운드 정리
+    if (IsValid(SteamAudio) && SteamAudio->IsPlaying())
+    {
+        SteamAudio->Stop();
+    }
+
+    // 레벨 전환이 아닌 경우에만 완전히 파괴
+    if (EndPlayReason == EEndPlayReason::Destroyed)
+    {
+        if (IsValid(SteamAudio))
+        {
+            SteamAudio->DestroyComponent();
+            SteamAudio = nullptr;
+        }
+
+        if (IsValid(SteamPsc))
+        {
+            SteamPsc->DeactivateSystem();
+            SteamPsc->DestroyComponent();
+            SteamPsc = nullptr;
+        }
+
+        if (IsValid(SmokePsc))
+        {
+            SmokePsc->DeactivateSystem();
+            SmokePsc->DestroyComponent();
+            SmokePsc = nullptr;
+        }
+    }
+
+    Super::EndPlay(EndPlayReason);
 }
 
 void UCombustibleComponent::SetOwningRoom(ARoomActor* InRoom)
@@ -48,42 +194,40 @@ void UCombustibleComponent::SetOwningRoom(ARoomActor* InRoom)
 void UCombustibleComponent::AddIgnitionPressure(const FGuid& SourceFireId, float Pressure)
 {
     if (Pressure <= KINDA_SMALL_NUMBER) return;
+
     PendingPressure += Pressure;
-    if (UWorld* W = GetWorld())
-        LastInputTime = W->GetTimeSeconds();
-    UE_LOG(LogComb, Warning, TEXT("[Comb] PressureIn Owner=%s P=%.4f Prog=%.4f"),
-        *GetNameSafe(GetOwner()), Pressure, Ignition.IgnitionProgress01);
+
+    if (const UWorld* World = GetWorld())
+    {
+        LastInputTime = World->GetTimeSeconds();
+    }
 }
 
 void UCombustibleComponent::AddHeat(float HeatDelta)
 {
     if (HeatDelta <= KINDA_SMALL_NUMBER) return;
+
     PendingHeat += HeatDelta;
-    if (UWorld* W = GetWorld())
-        LastInputTime = W->GetTimeSeconds();
+
+    if (const UWorld* World = GetWorld())
+    {
+        LastInputTime = World->GetTimeSeconds();
+    }
 }
 
 void UCombustibleComponent::ConsumeFuel(float ConsumeAmount)
 {
     if (ConsumeAmount <= 0.f) return;
+
     Fuel.FuelCurrent = FMath::Max(0.f, Fuel.FuelCurrent - ConsumeAmount);
 }
 
 bool UCombustibleComponent::CanIgniteNow() const
 {
     if (IsBurning()) return false;
-
-    // 전기 타입 조건
-    if (CombustibleType == ECombustibleType::Electric && !bElectricIgnitionTriggered)
-        return false;
-
-    // 연료 0이면 점화 불가
-    if (Fuel.FuelCurrent <= 0.f)
-        return false;
-
-    // 룸 없으면 “환경과 무관”하게 점화시킬 수도 있으나, 여기선 룸 필수로 가정
-    if (!OwningRoom.IsValid())
-        return false;
+    if (CombustibleType == ECombustibleType::Electric && !bElectricIgnitionTriggered) return false;
+    if (Fuel.FuelCurrent <= KINDA_SMALL_NUMBER) return false;
+    if (!OwningRoom.IsValid()) return false;
 
     return true;
 }
@@ -92,19 +236,41 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    // 1) 점화 진행도 업데이트(불 붙기 전 포함)
+    // 레벨 전환 후 컴포넌트 재생성 필요 여부 체크
+    if (bComponentsNeedRecreation)
+    {
+        AActor* Owner = GetOwner();
+        if (IsValid(Owner) && IsValid(Owner->GetRootComponent()))
+        {
+            EnsureComponentsCreated(Owner, Owner->GetRootComponent());
+            ApplyTemplatesAndSounds();
+            bComponentsNeedRecreation = false;
+        }
+    }
+
+    // 최적화: 활동이 없으면 조기 종료
+    const bool bHasActivity = (PendingPressure > KINDA_SMALL_NUMBER) ||
+        (PendingHeat > KINDA_SMALL_NUMBER) ||
+        (PendingWater01 > KINDA_SMALL_NUMBER) ||
+        IsBurning();
+
+    if (!bHasActivity && Ignition.IgnitionProgress01 <= KINDA_SMALL_NUMBER)
+    {
+        return;
+    }
+
+    // 1) 점화 진행도 업데이트
     UpdateIgnitionProgress(DeltaTime);
 
     // 2) 물에 의한 냉각/진압 적용
+    const bool bWasWaterActive = PendingWater01 > 0.05f;
+
     if (PendingWater01 > KINDA_SMALL_NUMBER)
     {
-        // 불 붙기 전: 점화 진행도 감소(냉각)
-        Ignition.IgnitionProgress01 = FMath::Max<float>(
-            0.f,
+        Ignition.IgnitionProgress01 = FMath::Max(0.f,
             Ignition.IgnitionProgress01 - PendingWater01 * WaterCoolPerSec * DeltaTime
         );
 
-        // 불 붙은 상태: 서서히 소화(ExtinguishAlpha01 증가)
         if (IsBurning())
         {
             ExtinguishAlpha01 = FMath::Clamp(
@@ -113,61 +279,105 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
             );
         }
 
-        // 물 입력 감쇠
-        PendingWater01 = FMath::Max<float>(
-            0.f,
-            PendingWater01 - WaterDecayPerSec * DeltaTime
-        );
+        PendingWater01 = FMath::Max(0.f, PendingWater01 - WaterDecayPerSec * DeltaTime);
     }
     else
     {
-        // 물이 끊기면 소화 진행도는 천천히 복귀시킬지/유지할지 취향
-        ExtinguishAlpha01 = FMath::Max<float>(0.f, ExtinguishAlpha01 - 0.05f * DeltaTime);
+        if (ExtinguishAlpha01 > KINDA_SMALL_NUMBER)
+        {
+            ExtinguishAlpha01 = FMath::Max(0.f, ExtinguishAlpha01 - 0.05f * DeltaTime);
+        }
     }
 
-    // 3) 연기 알파(불 붙기 전 훈소 포함) -> Smoke01
-    const float t = FMath::GetMappedRangeValueClamped(
+    // 3) 수증기 사운드 관리 - ONE SHOT 방식
+    const bool bWaterHittingFire = IsBurning() && (PendingWater01 > 0.05f);
+
+
+    if (PendingWater01 > 0.01f)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[Steam] DEBUG: Owner=%s IsBurning=%d PendingWater=%.3f bWaterHittingFire=%d"),
+            *GetNameSafe(GetOwner()), IsBurning(), PendingWater01, bWaterHittingFire);
+        UE_LOG(LogTemp, Warning, TEXT("[Steam] DEBUG: SteamPsc Valid=%d, SteamAudio Valid=%d, SteamSound Valid=%d"),
+            IsValid(SteamPsc), IsValid(SteamAudio), SteamSound != nullptr);
+    }
+
+    if (IsValid(SteamAudio) && SteamSound)
+    {
+        // 물이 처음 닿기 시작했을 때만 재생
+        if (bWaterHittingFire && !bWasWaterSoundPlaying)
+        {
+            if (!SteamAudio->IsPlaying())
+            {
+                SteamAudio->Play();
+                bWasWaterSoundPlaying = true;
+                UE_LOG(LogTemp, Warning, TEXT("[Steam] Sound STARTED (ONE-SHOT) on %s"), *GetNameSafe(GetOwner()));
+            }
+        }
+        // 물이 완전히 끊기면 플래그 리셋
+        else if (!bWaterHittingFire && bWasWaterSoundPlaying)
+        {
+            bWasWaterSoundPlaying = false;
+
+            // 사운드가 아직 재생 중이면 페이드아웃
+            if (SteamAudio->IsPlaying())
+            {
+                SteamAudio->FadeOut(0.5f, 0.f);
+                UE_LOG(LogTemp, Warning, TEXT("[Steam] Sound FADING OUT on %s"), *GetNameSafe(GetOwner()));
+            }
+        }
+    }
+
+    // 4) 연기 알파
+    const float TargetSmokeAlpha = FMath::GetMappedRangeValueClamped(
         FVector2D(SmokeStartProgress, SmokeFullProgress),
         FVector2D(0.f, 1.f),
         Ignition.IgnitionProgress01
     );
-    SmokeAlpha01 = FMath::FInterpTo(SmokeAlpha01, t, DeltaTime, 2.0f);
 
-    // === [NEW] Cascade 파라미터 주입 (지정된 이름만) ===
-    // Smoke01: 훈소/Progress 기반
+    SmokeAlpha01 = FMath::FInterpTo(SmokeAlpha01, TargetSmokeAlpha, DeltaTime, 2.0f);
+
     if (IsValid(SmokePsc))
     {
         SmokePsc->SetFloatParameter(TEXT("Smoke01"), SmokeAlpha01);
-
-        // 0이면 꺼두고 싶으면(선택)
-        SmokePsc->SetFloatParameter(TEXT("Smoke01"), SmokeAlpha01);
     }
 
-    // Steam01: 물 접촉 기반 (입력 있을 때만)
-    const float Steam01 = FMath::Clamp(PendingWater01, 0.f, 1.f);
+    // 5) Steam VFX
+    const float Steam01 = bWaterHittingFire ? FMath::Clamp(PendingWater01, 0.f, 1.f) : 0.f;
+
     if (IsValid(SteamPsc))
     {
         SteamPsc->SetFloatParameter(TEXT("Steam01"), Steam01);
 
-        if (Steam01 <= 0.01f) SteamPsc->DeactivateSystem();
-        else                  SteamPsc->ActivateSystem(true);
+        if (Steam01 <= 0.01f)
+        {
+            if (SteamPsc->IsActive())
+            {
+                SteamPsc->DeactivateSystem();
+            }
+        }
+        else
+        {
+            if (!SteamPsc->IsActive())
+            {
+                SteamPsc->ActivateSystem(true);
+                UE_LOG(LogTemp, Warning, TEXT("[Steam] VFX ACTIVATED! Steam01=%.2f"), Steam01);
+            }
+        }
     }
-    // === [/NEW] ===
 
-    // 4) 점화 시도
+    // 6) 점화 시도
     TryIgnite();
 
-    // 5) 소화 판정: ExtinguishAlpha01이 충분하면 FireActor에 “소화 요청”
-    if (IsBurning() && ExtinguishAlpha01 >= 1.f)
+    // 7) 소화 판정
+    if (IsBurning() && (ExtinguishAlpha01 >= 1.f))
     {
         if (IsValid(ActiveFire))
         {
-            ActiveFire->Extinguish(); // “서서히”의 끝에서 완전 소화
+            ActiveFire->Extinguish();
         }
         ExtinguishAlpha01 = 0.f;
     }
 }
-
 
 void UCombustibleComponent::UpdateIgnitionProgress(float DeltaTime)
 {
@@ -177,41 +387,28 @@ void UCombustibleComponent::UpdateIgnitionProgress(float DeltaTime)
     PendingPressure = 0.f;
     PendingHeat = 0.f;
 
-    const float InputImpulse =
-        (PressureImpulse + HeatImpulse * 0.25f) * Ignition.Flammability;
+    const float InputImpulse = (PressureImpulse + HeatImpulse * 0.25f) * Ignition.Flammability;
 
     if (InputImpulse > KINDA_SMALL_NUMBER)
     {
-        // DeltaTime 절대 곱하지 말 것
         Ignition.IgnitionProgress01 = FMath::Clamp(
-            Ignition.IgnitionProgress01
-            + InputImpulse * Ignition.IgnitionSpeed,
+            Ignition.IgnitionProgress01 + InputImpulse * Ignition.IgnitionSpeed,
             0.f, 1.25f
         );
     }
-    else
+    else if (Ignition.IgnitionProgress01 > KINDA_SMALL_NUMBER)
     {
-        // 감쇠만 시간 기반
-        Ignition.IgnitionProgress01 = FMath::Max(
-            0.f,
-            Ignition.IgnitionProgress01
-            - Ignition.IgnitionDecayPerSec * DeltaTime
+        Ignition.IgnitionProgress01 = FMath::Max(0.f,
+            Ignition.IgnitionProgress01 - Ignition.IgnitionDecayPerSec * DeltaTime
         );
     }
 }
 
-
-
-
 void UCombustibleComponent::TryIgnite()
 {
-    if (!CanIgniteNow())
-        return;
+    if (!CanIgniteNow()) return;
+    if (Ignition.IgnitionProgress01 < Ignition.IgniteThreshold) return;
 
-    if (Ignition.IgnitionProgress01 < Ignition.IgniteThreshold)
-        return;
-
-    // 점화!
     OnIgnited();
 }
 
@@ -221,22 +418,17 @@ void UCombustibleComponent::OnIgnited()
     if (!IsValid(Room)) return;
 
     UE_LOG(LogComb, Warning, TEXT("[Comb] IGNITE Owner=%s Room=%s Type=%d"),
-        *GetNameSafe(GetOwner()),
-        *GetNameSafe(Room),
-        (int32)CombustibleType);
+        *GetNameSafe(GetOwner()), *GetNameSafe(Room), static_cast<int32>(CombustibleType));
 
     AFireActor* NewFire = Room->SpawnFireForCombustible(this, CombustibleType);
     if (!IsValid(NewFire))
     {
-        // 실패하면 진행도 일부 유지 or 리셋(취향)
         Ignition.IgnitionProgress01 = 0.5f;
         return;
     }
 
     ActiveFire = NewFire;
     bIsBurning = true;
-
-    // 진행도는 불 붙으면 잠깐 유지했다가(재점화 방지) 0으로 내려도 됨
     Ignition.IgnitionProgress01 = 0.f;
 }
 
@@ -244,53 +436,47 @@ void UCombustibleComponent::OnExtinguished()
 {
     bIsBurning = false;
     ActiveFire = nullptr;
+
+    // 소화 시 사운드 플래그도 리셋
+    bWasWaterSoundPlaying = false;
 }
 
-AFireActor* UCombustibleComponent::ForceIgnite(bool bAllowElectric /*=true*/)
+AFireActor* UCombustibleComponent::ForceIgnite(bool bAllowElectric)
 {
     if (!CanIgniteNow()) return nullptr;
     if (IsBurning()) return ActiveFire;
 
-    if (CombustibleType == ECombustibleType::Electric && !bAllowElectric)
-        return nullptr;
-
-    if (CombustibleType == ECombustibleType::Electric && !bElectricIgnitionTriggered)
-        return nullptr;
-
-    ARoomActor* Room = OwningRoom.Get();
-    if (!IsValid(Room))
+    if (CombustibleType == ECombustibleType::Electric)
     {
-        // 룸이 안 잡혔다면 Owner에서 룸을 찾는 폴백(선택)
-        return nullptr;
+        if (!bAllowElectric || !bElectricIgnitionTriggered)
+            return nullptr;
     }
 
-    AActor* OwnerActor = GetOwner();
-    if (!IsValid(OwnerActor))
-        return nullptr;
+    ARoomActor* Room = OwningRoom.Get();
+    if (!IsValid(Room)) return nullptr;
 
-    // Room이 최종 스폰(위치/Attach/등록 등 한 곳에서 관리)
+    AActor* OwnerActor = GetOwner();
+    if (!IsValid(OwnerActor)) return nullptr;
+
     return Room->IgniteActor(OwnerActor);
 }
 
 void UCombustibleComponent::EnsureFuelInitialized()
 {
-    const float BeforeInit = Fuel.FuelInitial;
-    const float BeforeCur = Fuel.FuelCurrent;
-
     if (Fuel.FuelInitial <= 0.f)
+    {
         Fuel.FuelInitial = 12.f;
+    }
 
-    // 핵심: "0이면 채움"이 아니라, Current가 Init보다 작으면 올려버림
-    // (BP/데이터가 Current만 0으로 들어오는 케이스를 강제로 복구)
     Fuel.FuelCurrent = FMath::Clamp(Fuel.FuelCurrent, 0.f, Fuel.FuelInitial);
-    if (Fuel.FuelCurrent <= 0.f)
-        Fuel.FuelCurrent = Fuel.FuelInitial;
 
-    UE_LOG(LogComb, Warning, TEXT("[Comb] EnsureFuel Owner=%s Init %.2f->%.2f Cur %.2f->%.2f"),
-        *GetNameSafe(GetOwner()), BeforeInit, Fuel.FuelInitial, BeforeCur, Fuel.FuelCurrent);
+    if (Fuel.FuelCurrent <= 0.f)
+    {
+        Fuel.FuelCurrent = Fuel.FuelInitial;
+    }
 }
 
-void UCombustibleComponent::AddWaterContact(float Amount01)
+void UCombustibleComponent::AddWaterContact(float Amount01, bool bTriggerSound)
 {
     PendingWater01 = FMath::Clamp(PendingWater01 + Amount01, 0.f, 1.5f);
 }

@@ -32,7 +32,7 @@ AFireActor::AFireActor()
 
     FirePsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("FirePSC"));
     FirePsc->SetupAttachment(Root);
-    FirePsc->bAutoActivate = true;
+    FirePsc->bAutoActivate = false;
 }
 
 void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
@@ -57,6 +57,24 @@ void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
 void AFireActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (IsValid(FirePsc))
+    {
+        if (FireTemplate)
+        {
+            FirePsc->SetTemplate(FireTemplate);
+        }
+        FirePsc->ActivateSystem(true);
+
+        UE_LOG(LogFire, Warning, TEXT("[Fire] VFX Activated! Template=%s"), *GetNameSafe(FireTemplate));
+    }
+
+    UE_LOG(LogFire, Error, TEXT("[Fire] BeginPlay Location=%s"), *GetActorLocation().ToString());
+
+    if (IgnitedTarget.IsValid())
+    {
+        UE_LOG(LogFire, Error, TEXT("[Fire] Target Location=%s"), *IgnitedTarget->GetActorLocation().ToString());
+    }
 
     if (FireTemplate) FirePsc->SetTemplate(FireTemplate);
 

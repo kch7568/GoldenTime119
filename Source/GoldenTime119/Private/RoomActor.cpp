@@ -75,6 +75,8 @@ void ARoomActor::BeginPlay()
 {
     Super::BeginPlay();
 
+    UE_LOG(LogFire, Error, TEXT("[Fire] BeginPlay START Loc=%s"), *GetActorLocation().ToString());
+
     // 초기 스캔(Overlap이 누락될 수 있으니 보조로 한번)
     Debug_RescanCombustibles();
 
@@ -252,7 +254,7 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
     if (!FireClass)
         FireClass = AFireActor::StaticClass();
 
-    const FVector TargetCenter = OwnerActor->GetComponentsBoundingBox(true).GetCenter();
+    const FVector TargetCenter = OwnerActor->GetActorLocation();
     const FTransform SpawnTM(FRotator::ZeroRotator, TargetCenter);
 
     AFireActor* NewFire = GetWorld()->SpawnActorDeferred<AFireActor>(
@@ -277,10 +279,9 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
 
     // 0,0,0 문제 방지: 스폰 후 강제 위치 + 어태치
     NewFire->SetActorLocation(TargetCenter, false, nullptr, ETeleportType::TeleportPhysics);
-    NewFire->AttachToActor(OwnerActor, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+    NewFire->AttachToActor(OwnerActor, FAttachmentTransformRules::KeepWorldTransform);
     NewFire->SetActorRelativeLocation(FVector::ZeroVector);
     NewFire->SetActorRelativeRotation(FRotator::ZeroRotator);
-    NewFire->SetActorLocation(TargetCenter, false, nullptr, ETeleportType::TeleportPhysics);
 
     UE_LOG(LogFire, Warning, TEXT("[Room] FireSpawned Fire=%s Id=%s Target=%s Loc=%s"),
         *GetNameSafe(NewFire),
@@ -295,6 +296,7 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
     Comb->Ignition.IgnitionProgress01 = 0.f;
 
     OnFireSpawned.Broadcast(NewFire);
+
     return NewFire;
 }
 

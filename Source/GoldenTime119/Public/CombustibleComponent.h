@@ -5,6 +5,8 @@
 #include "Components/ActorComponent.h"
 #include "CombustibleType.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
 #include "CombustibleComponent.generated.h"
 
 class ARoomActor;
@@ -18,7 +20,7 @@ struct FCombustibleIgnitionParams
     // 점화 진행도(0..1)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ignition") float IgnitionProgress01 = 0.f;
 
-    // 외부(불)로부터 들어오는 “압력/열”을 진행도로 변환하는 속도
+    // 외부(불)로부터 들어오는 "압력/열"을 진행도로 변환하는 속도
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ignition") float IgnitionSpeed = 0.55f;
 
     // 압력 없으면 감쇠(진압/냉각/거리)
@@ -27,7 +29,7 @@ struct FCombustibleIgnitionParams
     // 임계치(1.0이면 단순, 낮추면 더 잘 붙음)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ignition") float IgniteThreshold = 1.0f;
 
-    // “가연성” 계수 (목재/천/플라스틱 등)
+    // "가연성" 계수 (목재/천/플라스틱 등)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ignition") float Flammability = 1.0f;
 };
 
@@ -39,7 +41,7 @@ struct FCombustibleFuelParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fuel") float FuelInitial = 12.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fuel") float FuelCurrent = 12.f;
 
-    // Fire가 Consume할 때 “기본 배수”(타입별 정책 + 이 값)
+    // Fire가 Consume할 때 "기본 배수"(타입별 정책 + 이 값)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fuel") float FuelConsumeMul = 1.0f;
 
     // USTRUCT 안에서는 UFUNCTION 불가 -> C++ 인라인 함수로만 제공
@@ -75,6 +77,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Combustible|Fuel")
     void EnsureFuelInitialized();
 
+    // === VFX 컴포넌트 ===
     UPROPERTY(VisibleAnywhere, Category = "VFX")
     TObjectPtr<UParticleSystemComponent> SmokePsc = nullptr;
 
@@ -86,6 +89,17 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "VFX")
     TObjectPtr<UParticleSystem> SteamTemplate = nullptr;
+
+    // === 수증기 사운드 ===
+    UPROPERTY(VisibleAnywhere, Category = "Audio")
+    TObjectPtr<UAudioComponent> SteamAudio = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "Audio")
+    TObjectPtr<USoundBase> SteamSound = nullptr;
+
+    // 수증기 사운드 재생 쿨타임 (같은 소리 반복 방지)
+    UPROPERTY(EditAnywhere, Category = "Audio")
+    float SteamSoundCooldown = 0.5f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combustible|Fuel")
     FCombustibleFuelParams Fuel;
@@ -109,7 +123,7 @@ public:
     float ExtinguishAlpha01 = 0.f;        // 0..1 (1이면 완전 소화)
 
     // 물(또는 소화약제) 입력: 0..1 정도로 누적해서 Tick에서 감쇠/적용
-    void AddWaterContact(float Amount01);
+    void AddWaterContact(float Amount01, bool bTriggerSound = true);
 
     // 현재 화재
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Combustible|Runtime")
@@ -146,6 +160,7 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
     // 룸
@@ -157,10 +172,13 @@ private:
 
     // 디버그/추적
     float LastInputTime = 0.f;
-    
+
     //물 
     UPROPERTY(VisibleInstanceOnly, Category = "Combustible|Suppression")
     float PendingWater01 = 0.f;
+
+    // 수증기 사운드 타이머
+    float SteamSoundTimer = 0.f;
 
     // 물 입력 감쇠(초당). 전역(static)로 두지 말고 멤버/상수로.
     static constexpr float WaterDecayPerSec = 1.25f;
@@ -172,4 +190,17 @@ private:
 
     void OnIgnited();
     void OnExtinguished();
+
+    // 수증기 사운드 재생 (쿨타임 체크 포함)
+    void PlaySteamSound();
+protected:
+    virtual void OnComponentCreated() override;
+    virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
+
+private:
+    void EnsureComponentsCreated(AActor* Owner, USceneComponent* RootComp);
+
+    bool bComponentsNeedRecreation = false;
+    bool bWasWaterSoundPlaying = false;
+    void ApplyTemplatesAndSounds();
 };
