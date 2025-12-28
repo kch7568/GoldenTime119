@@ -1,4 +1,3 @@
-// FireHose.h
 #pragma once
 
 #include "CoreMinimal.h"
@@ -21,47 +20,57 @@ class GOLDENTIME119_API AFireHose : public AActor
 public:
     AFireHose();
 
-    // === 컴포넌트 ===
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose")
     TObjectPtr<USceneComponent> Root;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose")
     TObjectPtr<UParticleSystemComponent> WaterPsc;
 
-    // === VFX 템플릿 ===
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose")
+    TObjectPtr<USceneComponent> NozzlePoint;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|VFX")
     TObjectPtr<UParticleSystem> FocusedWaterTemplate;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|VFX")
     TObjectPtr<UParticleSystem> SprayWaterTemplate;
 
-    // === 모드 ===
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|State")
     EHoseMode CurrentMode = EHoseMode::Focused;
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|State")
     bool bIsFiring = false;
 
-    // === 설정 ===
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
+    // === Focused 모드 설정 ===
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Focused")
     float FocusedRange = 800.f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
-    float FocusedRadius = 50.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Focused")
+    float FocusedRadius = 100.f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
-    float FocusedWaterAmount = 0.5f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Focused")
+    float FocusedWaterAmount = 3.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
+    // === Spray 모드 설정 ===
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Spray")
     float SprayRange = 500.f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
-    float SprayRadius = 200.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Spray")
+    float SprayRadius = 250.f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Settings")
-    float SprayWaterAmount = 0.3f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Spray")
+    float SprayWaterAmount = 2.0f;
 
-    // === 함수 ===
+    // === 곡선(포물선) 설정 ===
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Curve")
+    float WaterGravity = 300.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Curve")
+    int32 TraceSegments = 8;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Curve")
+    bool bDebugDraw = true;
+
     UFUNCTION(BlueprintCallable, Category = "Hose")
     void SetMode(EHoseMode NewMode);
 
@@ -77,10 +86,10 @@ protected:
 
 private:
     void UpdateWaterVFX();
-    void ApplyWaterToTargets(float DeltaSeconds);
     void SetupInputBindings();
+    void CalculateWaterPath(TArray<FVector>& OutPoints);
+    void TraceAlongWaterPath(float DeltaSeconds);
 
-    // 입력 핸들러
     void OnFocusedModePressed();
     void OnSprayModePressed();
     void OnFirePressed();

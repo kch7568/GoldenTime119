@@ -4,6 +4,7 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "DrawDebugHelpers.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogHose, Log, All);
 
@@ -14,15 +15,17 @@ AFireHose::AFireHose()
     Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
     SetRootComponent(Root);
 
+    NozzlePoint = CreateDefaultSubobject<USceneComponent>(TEXT("NozzlePoint"));
+    NozzlePoint->SetupAttachment(Root);
+
     WaterPsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("WaterPSC"));
-    WaterPsc->SetupAttachment(Root);
+    WaterPsc->SetupAttachment(NozzlePoint);
     WaterPsc->bAutoActivate = false;
 }
 
 void AFireHose::BeginPlay()
 {
     Super::BeginPlay();
-
     SetMode(EHoseMode::Focused);
     SetupInputBindings();
 }
@@ -49,7 +52,7 @@ void AFireHose::Tick(float DeltaSeconds)
 
     if (bIsFiring)
     {
-        ApplyWaterToTargets(DeltaSeconds);
+        TraceAlongWaterPath(DeltaSeconds);
     }
 }
 
@@ -91,17 +94,9 @@ void AFireHose::UpdateWaterVFX()
 {
     if (!IsValid(WaterPsc)) return;
 
-    UParticleSystem* Template = nullptr;
-
-    switch (CurrentMode)
-    {
-    case EHoseMode::Focused:
-        Template = FocusedWaterTemplate;
-        break;
-    case EHoseMode::Spray:
-        Template = SprayWaterTemplate;
-        break;
-    }
+    UParticleSystem* Template = (CurrentMode == EHoseMode::Focused)
+        ? FocusedWaterTemplate
+        : SprayWaterTemplate;
 
     if (Template)
     {
@@ -109,51 +104,101 @@ void AFireHose::UpdateWaterVFX()
     }
 }
 
-void AFireHose::ApplyWaterToTargets(float DeltaSeconds)
+void AFireHose::CalculateWaterPath(TArray<FVector>& OutPoints)
 {
+    OutPoints.Empty();
+
+    FVector StartPos = NozzlePoint->GetComponentLocation();
+    FVector Forward = NozzlePoint->GetForwardVector();
+
     float Range = (CurrentMode == EHoseMode::Focused) ? FocusedRange : SprayRange;
+    float Gravity = WaterGravity;
+
+    if (CurrentMode == EHoseMode::Focused)
+    {
+        Gravity *= 0.3f;
+    }
+
+    for (int32 i = 0; i <= TraceSegments; i++)
+    {
+        float T = (float)i / (float)TraceSegments;
+        float Distance = Range * T;
+        float Drop = Gravity * T * T;
+
+        FVector Point = StartPos + (Forward * Distance) - FVector(0, 0, Drop);
+        OutPoints.Add(Point);
+    }
+}
+
+void AFireHose::TraceAlongWaterPath(float DeltaSeconds)
+{
+    TArray<FVector> WaterPath;
+    CalculateWaterPath(WaterPath);
+
     float Radius = (CurrentMode == EHoseMode::Focused) ? FocusedRadius : SprayRadius;
     float WaterAmount = (CurrentMode == EHoseMode::Focused) ? FocusedWaterAmount : SprayWaterAmount;
+    float Range = (CurrentMode == EHoseMode::Focused) ? FocusedRange : SprayRange;
 
-    FVector Start = GetActorLocation();
-    FVector Forward = GetActorForwardVector();
-    FVector End = Start + Forward * Range;
+    TSet<AActor*> HitActors;
 
-    TArray<FHitResult> HitResults;
-    TArray<AActor*> IgnoreActors;
-    IgnoreActors.Add(this);
+    TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes;
+    ObjectTypes.Add(UEngineTypes::ConvertToObjectType(ECC_WorldDynamic));
+    ObjectTypes.Add(UEngineTypes::ConvertToObjectType(ECC_WorldStatic));
 
-    bool bHit = UKismetSystemLibrary::SphereTraceMulti(
-        GetWorld(),
-        Start,
-        End,
-        Radius,
-        UEngineTypes::ConvertToTraceType(ECC_WorldDynamic),
-        false,
-        IgnoreActors,
-        EDrawDebugTrace::ForOneFrame,
-        HitResults,
-        true
-    );
+    TArray<AActor*> ActorsToIgnore;
+    ActorsToIgnore.Add(this);
 
-    if (bHit)
+    for (int32 i = 0; i < WaterPath.Num() - 1; i++)
     {
-        for (const FHitResult& Hit : HitResults)
+        FVector SegmentStart = WaterPath[i];
+        FVector SegmentEnd = WaterPath[i + 1];
+        FVector SegmentCenter = (SegmentStart + SegmentEnd) * 0.5f;
+
+        if (bDebugDraw)
         {
-            AActor* HitActor = Hit.GetActor();
-            if (!IsValid(HitActor)) continue;
+            DrawDebugLine(GetWorld(), SegmentStart, SegmentEnd, FColor::Cyan, false, 0.0f, 0, 2.0f);
+            DrawDebugSphere(GetWorld(), SegmentCenter, Radius, 8, FColor::Blue, false, 0.0f, 0, 1.0f);
+        }
 
-            UCombustibleComponent* Comb = HitActor->FindComponentByClass<UCombustibleComponent>();
-            if (Comb)
+        TArray<AActor*> OutActors;
+        bool bHit = UKismetSystemLibrary::SphereOverlapActors(
+            GetWorld(),
+            SegmentCenter,
+            Radius,
+            ObjectTypes,
+            AActor::StaticClass(),
+            ActorsToIgnore,
+            OutActors
+        );
+
+        if (bHit)
+        {
+            for (AActor* HitActor : OutActors)
             {
-                float Distance = FVector::Dist(Start, Hit.ImpactPoint);
-                float DistanceRatio = 1.f - FMath::Clamp(Distance / Range, 0.f, 1.f);
-                float FinalAmount = WaterAmount * DistanceRatio * DeltaSeconds;
+                if (!IsValid(HitActor)) continue;
+                if (HitActors.Contains(HitActor)) continue;
 
-                Comb->AddWaterContact(FinalAmount);
+                UCombustibleComponent* Comb = HitActor->FindComponentByClass<UCombustibleComponent>();
+                if (Comb)
+                {
+                    // 거리 감소 완화 + 최소값 보장
+                    float Distance = FVector::Dist(WaterPath[0], SegmentCenter);
+                    float DistanceRatio = 1.f - FMath::Clamp(Distance / Range, 0.f, 1.f);
+                    DistanceRatio = FMath::Max(0.3f, DistanceRatio);  // 최소 30% 보장
 
-                UE_LOG(LogHose, Verbose, TEXT("[Hose] Water hit: %s Amount=%.3f"),
-                    *GetNameSafe(HitActor), FinalAmount);
+                    float FinalAmount = WaterAmount * DistanceRatio * DeltaSeconds;
+
+                    Comb->AddWaterContact(FinalAmount);
+                    HitActors.Add(HitActor);
+
+                    if (bDebugDraw)
+                    {
+                        DrawDebugSphere(GetWorld(), HitActor->GetActorLocation(), 50.f, 8, FColor::Green, false, 0.1f);
+                    }
+
+                    UE_LOG(LogHose, Warning, TEXT("[Hose] WATER HIT: %s Amount=%.3f IsBurning=%d"),
+                        *GetNameSafe(HitActor), FinalAmount, Comb->IsBurning());
+                }
             }
         }
     }
