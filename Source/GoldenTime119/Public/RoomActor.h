@@ -9,6 +9,9 @@
 class UBoxComponent;
 class AFireActor;
 class UCombustibleComponent;
+class UStaticMeshComponent;
+class UMaterialInstanceDynamic;
+class ADoorActor;
 
 UENUM(BlueprintType)
 enum class ERoomState : uint8
@@ -22,7 +25,7 @@ USTRUCT(BlueprintType)
 struct FRoomInfluence
 {
     GENERATED_BODY()
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) float HeatAdd = 0.f;     // per second-ish
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float HeatAdd = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) float SmokeAdd = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) float OxygenSub = 0.f;  // 0..1 per sec
     UPROPERTY(EditAnywhere, BlueprintReadWrite) float FireValueAdd = 0.f;
@@ -33,26 +36,24 @@ struct FRoomEnvSnapshot
 {
     GENERATED_BODY()
     UPROPERTY(BlueprintReadOnly) float Heat = 0.f;
-    UPROPERTY(BlueprintReadOnly) float Smoke = 0.f;
-    UPROPERTY(BlueprintReadOnly) float Oxygen = 1.f; // 0..1
+    UPROPERTY(BlueprintReadOnly) float Smoke = 0.f;        // 최종 합성(0..1)
+    UPROPERTY(BlueprintReadOnly) float Oxygen = 1.f;       // 0..1
     UPROPERTY(BlueprintReadOnly) float FireValue = 0.f;
     UPROPERTY(BlueprintReadOnly) ERoomState State = ERoomState::Idle;
 };
 
-// Fire가 룸에서 “현재 튜닝 결과”를 받아갈 때 쓰는 구조체
 USTRUCT(BlueprintType)
 struct FFireRuntimeTuning
 {
     GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly) float FuelRatio01 = 1.f;     // combustible fuel ratio
-    UPROPERTY(BlueprintReadOnly) float Intensity01 = 1.f;     // 0..1
+    UPROPERTY(BlueprintReadOnly) float FuelRatio01 = 1.f;
+    UPROPERTY(BlueprintReadOnly) float Intensity01 = 1.f;
 
     UPROPERTY(BlueprintReadOnly) float SpreadRadius = 350.f;
     UPROPERTY(BlueprintReadOnly) float SpreadInterval = 1.f;
 
     UPROPERTY(BlueprintReadOnly) float ConsumePerSecond = 1.f;
-
     UPROPERTY(BlueprintReadOnly) float InfluenceScale = 1.f;
 };
 
@@ -61,13 +62,12 @@ struct FNeutralPlaneState
 {
     GENERATED_BODY()
 
-    UPROPERTY(BlueprintReadOnly) float NeutralPlaneZ = 200.f;   // cm
-    UPROPERTY(BlueprintReadOnly) float UpperSmoke01 = 0.f;     // 0..1
-    UPROPERTY(BlueprintReadOnly) float UpperTempC = 25.f;    // 선택
-    UPROPERTY(BlueprintReadOnly) float Vent01 = 0.f;     // 0..1
+    UPROPERTY(BlueprintReadOnly) float NeutralPlaneZ = 200.f; // world Z (cm)
+    UPROPERTY(BlueprintReadOnly) float UpperSmoke01 = 0.f;    // 0..1
+    UPROPERTY(BlueprintReadOnly) float UpperTempC = 25.f;
+    UPROPERTY(BlueprintReadOnly) float Vent01 = 0.f;          // 0..1
 };
 
-// 타입별 정책(최소)
 USTRUCT(BlueprintType)
 struct FFirePolicy
 {
@@ -91,6 +91,29 @@ struct FFirePolicy
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Influence") float FireValueMul = 1.f;
 };
 
+// ============================ Backdraft ============================
+USTRUCT(BlueprintType)
+struct FBackdraftParams
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float SmokeMin = 0.35f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float FireValueMin = 8.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float O2Max = 0.18f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float HeatMin = 40.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float ArmedHoldSeconds = 3.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float CooldownSeconds = 8.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float VentBoostOnTrigger = 1.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float FireValueBoost = 10.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float SmokeDropOnTrigger = 0.15f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") bool bDisallowWhenRoomOnFire = true;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBackdraftEvent);
+
 UCLASS()
 class GOLDENTIME119_API ARoomActor : public AActor
 {
@@ -99,20 +122,24 @@ class GOLDENTIME119_API ARoomActor : public AActor
 public:
     ARoomActor();
 
-    // ===== Env =====
+    // ===== Env (권위값) =====
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float Heat = 0.f;
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float Smoke = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float Oxygen = 1.f;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float FireValue = 0.f;
 
-    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Room|State") ERoomState State = ERoomState::Idle;
+    // ===== Smoke (연동) =====
+    // UpperSmoke는 NP.UpperSmoke01이 권위
+    // LowerSmoke01은 Upper의 1/4을 기본 목표로(요구사항)
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|Smoke") float LowerSmoke01 = 0.f;
+
+    // 최종 합성 Smoke(0..1): State/Backdraft/UI에서 이 값을 사용
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|Smoke") float Smoke = 0.f;
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Room|State")
+    ERoomState State = ERoomState::Idle;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Threshold") float RiskHeatThreshold = 30.f;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Threshold") float MinOxygenToSustain = 0.15f;
-
-    // 인접 룸 (필요하면 Spread에서 약하게 전달)
-    UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Room|Link")
-    TArray<TObjectPtr<ARoomActor>> AdjacentRooms;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|Volume")
     TObjectPtr<UBoxComponent> RoomBounds;
@@ -127,110 +154,204 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Policy") FFirePolicy PolicyElectric;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Policy") FFirePolicy PolicyExplosive;
 
-    // Spread 후보 제한(성능/게임성)
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Normal = 3;
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Oil = 6;
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Electric = 4;
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Spread") int32 SpreadTopK_Explosive = 12;
+    // ===== NeutralPlane =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") bool bEnableNeutralPlane = true;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane") float FloorZ = 0.f;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane") float CeilingZ = 300.f;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane") FNeutralPlaneState NP;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    bool bEnableNeutralPlane = true;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float SmokeToUpperFillRate = 0.03f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float VentSmokeRemoveRate = 0.35f;
 
-    // 룸 높이/바닥 높이는 Box로부터 자동 계산 (cm)
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
-    float FloorZ = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float NeutralPlaneDropPerSec = 10.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float NeutralPlaneRisePerSec = 80.f;
 
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
-    float CeilingZ = 300.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float MinNeutralPlaneFromFloor = 40.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane") float MaxNeutralPlaneFromCeiling = 10.f;
 
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|NeutralPlane")
-    FNeutralPlaneState NP;
+    UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
+    FNeutralPlaneState GetNeutralPlane() const { return NP; }
 
-    // 튜닝 파라미터
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float SmokeToUpperFillRate = 0.12f;   // Smoke -> UpperSmoke01 전환 비율
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float VentSmokeRemoveRate = 0.35f;    // 환기 시 UpperSmoke01 감소
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float OpaqueStartSmoke01 = 0.5f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float NeutralPlaneDropPerSec = 90.f;  // UpperSmoke01이 높을수록 cm/s로 내려오는 속도
+    // 이 값쯤에서 거의 불투명(최대)으로
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float OpaqueFullSmoke01 = 0.75f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float NeutralPlaneRisePerSec = 60.f;  // 환기/진압 등으로 올라가는 속도
+    // 임계 이후 곡선 강도(클수록 더 “훅” 올라감)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume", meta = (ClampMin = "1.0", ClampMax = "8.0"))
+    float OpaqueCurvePow = 3.5f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float MinNeutralPlaneFromFloor = 40.f; // cm (완전 바닥까지는 안 가게)
+    // 불투명 부스트(기본 UpperSmokeOpacity에 곱)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+    float OpaqueBoostMul = 2.2f;
+    // ===== Door / Vent aggregation =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Door") bool bEnableDoorVentAggregation = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|NeutralPlane")
-    float MaxNeutralPlaneFromCeiling = 10.f; // cm (천장 바로 밑까지만)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Door")
+    float SealEpsilonVent01 = 0.02f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Door")
+    float VentAggregateClampMax = 1.f;
+
+    // ===== Door Exchange (방<->방, 방<->밖) =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|DoorExchange")
+    float DoorSmokeExchangeRate = 0.75f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|DoorExchange")
+    float DoorOxygenExchangeRate = 0.45f;
+
+    // ===== Smoke 연동 규칙 =====
+    // 요구사항: 하층은 상층의 1/4
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Smoke")
+    float LowerSmokeTargetRatio = 0.25f; // 1/4
+
+    // 상층/하층 부드러운 추종
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Smoke")
+    float LowerSmokeFollowSpeed = 1.25f;
+
+    // 최종 Smoke 합성(상층+하층)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Smoke")
+    float UpperSmokeWeight = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Smoke")
+    float LowerSmokeWeight = 1.0f;
+
+    // ===== 자연 감쇠/회복(화재 꺼짐/환기) =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Relax")
+    float HeatCoolToAmbientPerSec = 0.08f;   // Heat -> 0으로 수렴
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Relax")
+    float FireValueDecayPerSec = 0.18f;      // FireValue -> 0
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Relax")
+    float OxygenRecoverPerSec = 0.25f;       // Oxygen -> 1 (Vent 영향을 받음)
+
+    // Smoke는 Upper/Lower 자체가 문/환기에서 제거되므로, 별도 자연감쇠는 약하게만
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Relax")
+    float SmokeNaturalDissipatePerSec = 0.02f; // UpperSmoke01/LoweSmoke01 추가 소실(작게)
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+    float LowerVolumeHeightRatioToUpper = 0.25f;
+
+    // ===== Backdraft =====
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Backdraft") bool bEnableBackdraft = true;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Backdraft") FBackdraftParams Backdraft;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|Backdraft") float SealedTime = 0.f;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Room|Backdraft") bool bBackdraftArmed = false;
+
+    UPROPERTY(BlueprintAssignable, Category = "Room|Backdraft") FBackdraftEvent OnBackdraft;
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft") bool CanArmBackdraft() const;
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft") bool IsBackdraftArmed() const { return bBackdraftArmed; }
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft") void NotifyDoorSealed(bool bSealed);
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    void TriggerBackdraft(const FTransform& DoorTM, float VentBoost01);
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft")
+    bool bIgniteOnBackdraft = true;
+    void ApplyOxygenCapBySmoke(float DeltaSeconds);
+
+    // ===== Smoke Volumes (상층/하층 2개) =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume") bool bEnableSmokeVolume = true;
+
+    // 동일 클래스 재사용 가능(BP_Smoke)
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|SmokeVolume")
+    TSubclassOf<AActor> SmokeVolumeClass;
+
+    // 상층 기본 오파시티
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float UpperSmokeOpacity = 0.75f;
+
+    // 하층은 상층의 1/4
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float LowerSmokeOpacityScale = 0.25f;
+
+    // 머티리얼 파라미터
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float SmokeFadeHeight = 200.f;
+
+    // 방 벽과 z-fighting / clipping 완화(0.99 추천)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float SmokeXYInset = 0.99f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float SmokeCeilingAttachOffset = 2.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|SmokeVolume")
+    float SmokeCubeBaseSize = 100.f;
 
     // ===== Events =====
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRoomFireEvent, AFireActor*, Fire);
     UPROPERTY(BlueprintAssignable, Category = "Room|Event") FRoomFireEvent OnFireStarted;
     UPROPERTY(BlueprintAssignable, Category = "Room|Event") FRoomFireEvent OnFireExtinguished;
-    UPROPERTY(BlueprintAssignable, Category = "Room|Event") FRoomFireEvent OnFireSpawned; // spread or ignite
+    UPROPERTY(BlueprintAssignable, Category = "Room|Event") FRoomFireEvent OnFireSpawned;
 
 public:
-    // Combustible 등록(Overlap/수동 둘 다 가능)
     void RegisterCombustible(UCombustibleComponent* Comb);
     void UnregisterCombustible(UCombustibleComponent* Comb);
 
-    // Fire 등록(룸 상태용)
     void RegisterFire(AFireActor* Fire);
     void UnregisterFire(const FGuid& FireId);
 
-    // Fire -> Room 영향 누적
     void AccumulateInfluence(ECombustibleType Type, float EffectiveIntensity, float InfluenceScale);
-
-    // Fire가 런타임 튜닝 요청(연료는 Combustible이 권위자. Room은 “정책+환경 기반”으로만 튜닝)
     bool GetRuntimeTuning(ECombustibleType Type, float EffectiveIntensity, float FuelRatio01, FFireRuntimeTuning& Out) const;
 
-    // Fire 유지 가능? (룸 산소 기반만)
     bool CanSustainFire() const { return Oxygen > MinOxygenToSustain; }
 
-    // Env snapshot (Combustible/Fire가 읽음)
     UFUNCTION(BlueprintCallable, Category = "Room|Env")
     FRoomEnvSnapshot GetEnvSnapshot() const;
 
-    // “가연물”이 최종 권위: 이 함수로 Fire 스폰 요청
     AFireActor* SpawnFireForCombustible(UCombustibleComponent* TargetComb, ECombustibleType Type);
-
-    // Spread용: 룸 내부 가연물 리스트 제공 (RoomBounds 내부 + 등록된 컴포넌트 기준)
     void GetCombustiblesInRoom(TArray<UCombustibleComponent*>& Out, bool bExcludeBurning = true) const;
 
-    // BP 테스트 편의
-    UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
-    FNeutralPlaneState GetNeutralPlane() const { return NP; }
-
-    // 문/창/배연 상태를 BP/코드에서 주입
-    UFUNCTION(BlueprintCallable, Category = "Room|NeutralPlane")
-    void SetVent01(float InVent01) { NP.Vent01 = FMath::Clamp(InVent01, 0.f, 1.f); }
-    void Debug_RescanCombustibles(); // RoomBounds 내부에서 찾아서 등록
+    UFUNCTION(BlueprintCallable, Category = "Room|Test")
+    void Debug_RescanCombustibles();
 
     UFUNCTION(BlueprintCallable, Category = "Room|Fire")
     AFireActor* IgniteActor(AActor* TargetActor);
 
-    // 방 안 임의 가연물 점화(예전 RandomIgnite 복구)
     UFUNCTION(BlueprintCallable, Category = "Room|Fire")
     AFireActor* IgniteRandomCombustibleInRoom(bool bAllowElectric = false);
+
+    // Door registry (멀티 도어 지원)
+    UFUNCTION(BlueprintCallable, Category = "Room|Door")
+    void RegisterDoor(ADoorActor* Door);
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Door")
+    void UnregisterDoor(ADoorActor* Door);
 
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
 
 private:
-    // 현재 룸이 “알고 있는” 가연물들(권위는 컴포넌트)
     UPROPERTY() TSet<TWeakObjectPtr<UCombustibleComponent>> Combustibles;
-
-    // 활성 Fire(상태용)
     UPROPERTY() TMap<FGuid, TObjectPtr<AFireActor>> ActiveFires;
 
-    // 누적치
     float AccHeat = 0.f;
     float AccSmoke = 0.f;
     float AccOxygenSub = 0.f;
     float AccFireValue = 0.f;
+
+    // SmokeVolume runtime (2개)
+    UPROPERTY() TObjectPtr<AActor> UpperSmokeActor = nullptr;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> UpperSmokeMesh = nullptr;
+    UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> UpperSmokeMID = nullptr;
+
+    UPROPERTY() TObjectPtr<AActor> LowerSmokeActor = nullptr;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> LowerSmokeMesh = nullptr;
+    UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> LowerSmokeMID = nullptr;
+
+    // Doors
+    UPROPERTY() TArray<TWeakObjectPtr<ADoorActor>> Doors;
+
+    // Backdraft internal
+    float LastBackdraftTime = -1000.f;
 
 private:
     const FFirePolicy& GetPolicy(ECombustibleType Type) const;
@@ -240,17 +361,32 @@ private:
     void ResetAccumulators();
     void UpdateRoomState();
 
-    // RoomBounds 내부 판정(스케일 포함)
-    static bool IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldPos);
+    void RelaxEnv(float DeltaSeconds);
 
+    static bool IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldPos);
     void UpdateRoomGeometryFromBounds();
+
     void UpdateNeutralPlane(float DeltaSeconds);
 
-    // Overlap 이벤트(선택)
+    // Door 합성/교환
+    void UpdateVentFromDoors();
+    void ApplyDoorExchange(float DeltaSeconds);
+
+    // Smoke 연동(핵심)
+    void RebuildSmokeFromNP(float DeltaSeconds);
+
+    // Backdraft
+    void EvaluateBackdraftArming(float DeltaSeconds);
+
+    // SmokeVolume
+    void EnsureSmokeVolumesSpawned();
+    void UpdateSmokeVolumesTransform();
+    void PushSmokeMaterialParams();
+
+    // Overlap
     UFUNCTION() void OnRoomBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
         const FHitResult& SweepResult);
     UFUNCTION() void OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 };
-

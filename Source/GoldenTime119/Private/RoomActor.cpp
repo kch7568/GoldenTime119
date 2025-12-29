@@ -3,7 +3,12 @@
 
 #include "FireActor.h"
 #include "CombustibleComponent.h"
+#include "DoorActor.h"
+
 #include "Components/BoxComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -14,6 +19,16 @@ static FORCEINLINE FVector GetActorCenter(AActor* A)
     return IsValid(A) ? A->GetComponentsBoundingBox(true).GetCenter() : FVector::ZeroVector;
 }
 
+// 여러 Vent(0..1)를 “확률 합성”으로 결합: 1 - Π(1 - Vi)
+static float CombineVents_Prob(const TArray<float>& Vents)
+{
+    float Inv = 1.f;
+    for (float V : Vents)
+        Inv *= (1.f - FMath::Clamp(V, 0.f, 1.f));
+    return 1.f - Inv;
+}
+
+// ============================ ctor ============================
 ARoomActor::ARoomActor()
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -34,7 +49,7 @@ ARoomActor::ARoomActor()
 
     FireClass = AFireActor::StaticClass();
 
-    // 기본 정책(원하면 BP에서 조정)
+    // ===== Default Policies =====
     PolicyNormal.InitialFuel = 12.f;
     PolicyNormal.ConsumePerSecond_Min = 0.7f;
     PolicyNormal.ConsumePerSecond_Max = 1.3f;
@@ -71,38 +86,85 @@ ARoomActor::ARoomActor()
     PolicyExplosive.SmokeMul = 1.2f;
 }
 
+// ============================ BeginPlay / Tick ============================
 void ARoomActor::BeginPlay()
 {
     Super::BeginPlay();
 
-    UE_LOG(LogFire, Error, TEXT("[Fire] BeginPlay START Loc=%s"), *GetActorLocation().ToString());
-
-    // 초기 스캔(Overlap이 누락될 수 있으니 보조로 한번)
     Debug_RescanCombustibles();
-
-    UE_LOG(LogFire, Warning, TEXT("[Room] BeginPlay Room=%s Combustibles=%d"), *GetName(), Combustibles.Num());
-
     UpdateRoomGeometryFromBounds();
 
+    // ===== NeutralPlane init =====
     NP.NeutralPlaneZ = CeilingZ - MaxNeutralPlaneFromCeiling;
     NP.UpperSmoke01 = 0.f;
     NP.UpperTempC = 25.f;
+    NP.Vent01 = 0.f;
 
-    UE_LOG(LogFire, Warning, TEXT("[Room] BeginPlay Room=%s Combustibles=%d FloorZ=%.1f CeilingZ=%.1f"),
-        *GetName(), Combustibles.Num(), FloorZ, CeilingZ);
+    // ===== Smoke init (권위: NP/Lower에서 재구성) =====
+    LowerSmoke01 = 0.f;
+    Smoke = 0.f;
+
+    // ===== Smoke volumes =====
+    if (bEnableSmokeVolume)
+        EnsureSmokeVolumesSpawned();
+
+    // ===== Backdraft init =====
+    SealedTime = 0.f;
+    bBackdraftArmed = false;
+    LastBackdraftTime = -1000.f;
+
+    UE_LOG(LogFire, Warning,
+        TEXT("[Room] BeginPlay Room=%s Combustibles=%d Doors=%d FloorZ=%.1f CeilingZ=%.1f NPZ=%.1f"),
+        *GetName(), Combustibles.Num(), Doors.Num(), FloorZ, CeilingZ, NP.NeutralPlaneZ);
 }
 
 void ARoomActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
+    // 1) Fire → Room 영향 반영 (주의: Smoke(권위)는 여기서 직접 누적하지 않음)
     ApplyAccumulators(DeltaSeconds);
+
+    // 2) Door → Vent 합성 (멀티 도어)
+    if (bEnableDoorVentAggregation)
+        UpdateVentFromDoors();
+    else
+        NP.Vent01 = FMath::Clamp(NP.Vent01, 0.f, 1.f);
+
+    // 3) Door 기반 방-방 / 방-밖 교환 (UpperSmoke/O2 중심)
+    ApplyDoorExchange(DeltaSeconds);
+
+    // 4) Neutral Plane 업데이트 (UpperSmoke01, NPZ, UpperTempC)
     if (bEnableNeutralPlane)
         UpdateNeutralPlane(DeltaSeconds);
+
+    // 5) (핵심) NP -> LowerSmoke/Smoke 최종 합성
+    RebuildSmokeFromNP(DeltaSeconds);
+    ApplyOxygenCapBySmoke(DeltaSeconds);
+
+    // 6) 화재 꺼짐/환기 시 env 회복 (연기 소실은 "문 환기"로만)
+    RelaxEnv(DeltaSeconds);
+
+    // 7) Backdraft 장전 평가 (sealed는 Vent 기반)
+    if (bEnableBackdraft)
+        EvaluateBackdraftArming(DeltaSeconds);
+
+    // 8) Smoke Volumes
+    if (bEnableSmokeVolume)
+    {
+        EnsureSmokeVolumesSpawned();
+        UpdateSmokeVolumesTransform();
+        PushSmokeMaterialParams();
+    }
+
+    // 9) Room State
     UpdateRoomState();
+
+    // 10) 누적치 초기화
     ResetAccumulators();
 }
 
+// ============================ Policy / Influence ============================
 const FFirePolicy& ARoomActor::GetPolicy(ECombustibleType Type) const
 {
     switch (Type)
@@ -126,21 +188,18 @@ FRoomInfluence ARoomActor::BaseInfluence(ECombustibleType Type, float EffectiveI
         R.OxygenSub = 0.03f * EffectiveIntensity;
         R.FireValueAdd = 1.0f * EffectiveIntensity;
         break;
-
     case ECombustibleType::Oil:
         R.HeatAdd = 18.f * EffectiveIntensity;
         R.SmokeAdd = 12.f * EffectiveIntensity;
         R.OxygenSub = 0.05f * EffectiveIntensity;
         R.FireValueAdd = 1.6f * EffectiveIntensity;
         break;
-
     case ECombustibleType::Electric:
         R.HeatAdd = 10.f * EffectiveIntensity;
         R.SmokeAdd = 6.f * EffectiveIntensity;
         R.OxygenSub = 0.02f * EffectiveIntensity;
         R.FireValueAdd = 1.2f * EffectiveIntensity;
         break;
-
     case ECombustibleType::Explosive:
         R.HeatAdd = 25.f * EffectiveIntensity;
         R.SmokeAdd = 15.f * EffectiveIntensity;
@@ -178,8 +237,6 @@ bool ARoomActor::GetRuntimeTuning(ECombustibleType Type, float EffectiveIntensit
     );
 
     const float Fuel01 = FMath::Clamp(FuelRatio01, 0.f, 1.f);
-
-    // 연료/강도 혼합으로 반경, 주기 결정
     const float SpreadAlpha = FMath::Clamp(Fuel01 * (0.35f + 0.65f * Intensity01), 0.f, 1.f);
 
     Out.FuelRatio01 = Fuel01;
@@ -193,10 +250,139 @@ bool ARoomActor::GetRuntimeTuning(ECombustibleType Type, float EffectiveIntensit
     return true;
 }
 
+// ============================ Door registry ============================
+void ARoomActor::RegisterDoor(ADoorActor* Door)
+{
+    if (!IsValid(Door)) return;
+    Doors.AddUnique(Door);
+}
+
+void ARoomActor::UnregisterDoor(ADoorActor* Door)
+{
+    if (!Door) return;
+    Doors.Remove(Door);
+}
+
+// ============================ Vent aggregation ============================
+void ARoomActor::UpdateVentFromDoors()
+{
+    Doors.RemoveAll([](const TWeakObjectPtr<ADoorActor>& W) { return !W.IsValid(); });
+
+    TArray<float> Vents;
+    Vents.Reserve(Doors.Num());
+
+    for (const TWeakObjectPtr<ADoorActor>& W : Doors)
+    {
+        const ADoorActor* D = W.Get();
+        if (!IsValid(D)) continue;
+
+        Vents.Add(D->ComputeVent01());
+    }
+
+    const float Agg = CombineVents_Prob(Vents);
+    NP.Vent01 = FMath::Clamp(Agg, 0.f, VentAggregateClampMax);
+}
+
+// ============================ Door exchange (UpperSmoke/O2 권위) ============================
+// - UpperSmoke01: 방<->방은 차이만큼 이동, 방<->밖은 제거(=문 환기)
+// - Oxygen: 방<->방은 평형화, 방<->밖은 1.0으로 회복
+void ARoomActor::ApplyDoorExchange(float DeltaSeconds)
+{
+    if (Doors.Num() <= 0) return;
+
+    Doors.RemoveAll([](const TWeakObjectPtr<ADoorActor>& W) { return !W.IsValid(); });
+
+    for (const TWeakObjectPtr<ADoorActor>& W : Doors)
+    {
+        ADoorActor* Door = W.Get();
+        if (!IsValid(Door)) continue;
+
+        const float Vent = FMath::Clamp(Door->ComputeVent01(), 0.f, 1.f);
+        if (Vent <= KINDA_SMALL_NUMBER) continue;
+
+        ARoomActor* Other = Door->GetOtherRoom(this);
+        const bool bOutside = Door->IsOutsideConnectionFor(this);
+
+        // 1) UpperSmoke01 교환/배출
+        if (bOutside || !IsValid(Other))
+        {
+            // 밖으로 배출 (문 환기)
+            const float Remove = DoorSmokeExchangeRate * Vent * DeltaSeconds;
+            NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - Remove, 0.f, 1.f);
+
+            // 하층도 약하게 같이 빠짐(연출)
+            LowerSmoke01 = FMath::Clamp(LowerSmoke01 - Remove * 0.25f, 0.f, 1.f);
+        }
+        else
+        {
+            // 방-방: 높은 쪽 -> 낮은 쪽 이동
+            const float A = NP.UpperSmoke01;
+            const float B = Other->NP.UpperSmoke01;
+            const float Diff = (A - B);
+
+            if (FMath::Abs(Diff) > KINDA_SMALL_NUMBER)
+            {
+                const float Move = FMath::Clamp(Diff * DoorSmokeExchangeRate * Vent * DeltaSeconds, -1.f, 1.f);
+
+                NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - Move, 0.f, 1.f);
+                Other->NP.UpperSmoke01 = FMath::Clamp(Other->NP.UpperSmoke01 + Move, 0.f, 1.f);
+
+                // 하층도 약하게 따라감(연출)
+                LowerSmoke01 = FMath::Clamp(LowerSmoke01 - Move * 0.25f, 0.f, 1.f);
+                Other->LowerSmoke01 = FMath::Clamp(Other->LowerSmoke01 + Move * 0.25f, 0.f, 1.f);
+            }
+        }
+
+        // 2) Oxygen 평형화
+        const float TargetO2 = (bOutside || !IsValid(Other)) ? 1.f : Other->Oxygen;
+        const float O2New = FMath::FInterpTo(Oxygen, TargetO2, DeltaSeconds, DoorOxygenExchangeRate * Vent);
+        Oxygen = FMath::Clamp(O2New, 0.f, 1.f);
+    }
+}
+
+// ============================ Smoke 연동(핵심) ============================
+void ARoomActor::RebuildSmokeFromNP(float DeltaSeconds)
+{
+    const float Upper = FMath::Clamp(NP.UpperSmoke01, 0.f, 1.f);
+
+    // 하층은 상층의 1/4 (요구사항)
+    const float TargetLower = FMath::Clamp(Upper * LowerSmokeTargetRatio, 0.f, 1.f);
+    LowerSmoke01 = FMath::FInterpTo(LowerSmoke01, TargetLower, DeltaSeconds, FMath::Max(0.01f, LowerSmokeFollowSpeed));
+
+    // 최종 Smoke (권위: UI/상태/백드래프트 판정)
+    Smoke = FMath::Clamp(Upper * UpperSmokeWeight + LowerSmoke01 * LowerSmokeWeight, 0.f, 1.f);
+}
+
+// ============================ Env relax (화재 꺼짐/환기) ============================
+// 중요: "자연 vent 없음" 모드
+// - Heat/FireValue/Oxygen은 서서히 회복 가능
+// - Smoke는 "문 환기"로만 감소(=Vent>0일 때만)
+void ARoomActor::RelaxEnv(float DeltaSeconds)
+{
+    const bool bNoFire = (ActiveFires.Num() <= 0);
+    const float Vent = FMath::Clamp(NP.Vent01, 0.f, 1.f);
+
+    // 환기가 있거나(문 열림) 불이 없으면 회복 가속
+    const float VentBoost = (0.5f + 1.5f * Vent);
+    const float NoFireBoost = bNoFire ? 1.0f : 0.35f;
+
+    Heat = FMath::FInterpTo(Heat, 0.f, DeltaSeconds, HeatCoolToAmbientPerSec * VentBoost * NoFireBoost);
+    FireValue = FMath::FInterpTo(FireValue, 0.f, DeltaSeconds, FireValueDecayPerSec * VentBoost);
+    Oxygen = FMath::FInterpTo(Oxygen, 1.f, DeltaSeconds, OxygenRecoverPerSec * VentBoost);
+
+    // ✅ Smoke는 "문 환기"로만 소실 (Vent=0이면 여기서 손대지 않음)
+    if (Vent > KINDA_SMALL_NUMBER)
+    {
+        const float Dissip = SmokeNaturalDissipatePerSec * Vent * DeltaSeconds;
+        NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - Dissip, 0.f, 1.f);
+        LowerSmoke01 = FMath::Clamp(LowerSmoke01 - Dissip * 0.5f, 0.f, 1.f);
+    }
+}
+
+// ============================ Combustible / Fire registry ============================
 void ARoomActor::RegisterCombustible(UCombustibleComponent* Comb)
 {
     if (!IsValid(Comb)) return;
-
     Combustibles.Add(Comb);
     Comb->SetOwningRoom(this);
 }
@@ -240,14 +426,13 @@ FRoomEnvSnapshot ARoomActor::GetEnvSnapshot() const
     return S;
 }
 
+// ============================ Fire spawning ============================
 AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECombustibleType Type)
 {
-    if (!IsValid(Comb) || !GetWorld())
-        return nullptr;
+    if (!IsValid(Comb) || !GetWorld()) return nullptr;
 
     AActor* OwnerActor = Comb->GetOwner();
-    if (!IsValid(OwnerActor))
-        return nullptr;
+    if (!IsValid(OwnerActor)) return nullptr;
 
     Comb->EnsureFuelInitialized();
 
@@ -266,18 +451,14 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
         return nullptr;
     }
 
-    // Fire 초기화: 타겟/룸/타입 주입
     NewFire->SpawnRoom = this;
     NewFire->SpawnType = Type;
     NewFire->IgnitedTarget = OwnerActor;
     NewFire->LinkedCombustible = Comb;
 
-    // Init before BeginPlay
     NewFire->InitFire(this, Type);
-
     NewFire->FinishSpawning(SpawnTM);
 
-    // 0,0,0 문제 방지: 스폰 후 강제 위치 + 어태치
     NewFire->SetActorLocation(TargetCenter, false, nullptr, ETeleportType::TeleportPhysics);
     NewFire->AttachToActor(OwnerActor, FAttachmentTransformRules::KeepWorldTransform);
     NewFire->SetActorRelativeLocation(FVector::ZeroVector);
@@ -291,16 +472,13 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
 
     Comb->ActiveFire = NewFire;
     Comb->bIsBurning = true;
-
-    // 점화 진행도는 붙었으니 리셋(선택)
     Comb->Ignition.IgnitionProgress01 = 0.f;
 
     OnFireSpawned.Broadcast(NewFire);
-
     return NewFire;
 }
 
-
+// ============================ Combustible listing / rescan ============================
 void ARoomActor::GetCombustiblesInRoom(TArray<UCombustibleComponent*>& Out, bool bExcludeBurning) const
 {
     Out.Reset();
@@ -341,13 +519,17 @@ void ARoomActor::Debug_RescanCombustibles()
     UE_LOG(LogFire, Warning, TEXT("[Room] Rescan Room=%s Added=%d Total=%d"), *GetName(), Added, Combustibles.Num());
 }
 
+// ============================ Env apply/reset/state ============================
 void ARoomActor::ApplyAccumulators(float DeltaSeconds)
 {
     Heat += AccHeat * DeltaSeconds;
-    Smoke += AccSmoke * DeltaSeconds;
     FireValue += AccFireValue * DeltaSeconds;
 
     Oxygen = FMath::Clamp(Oxygen - (AccOxygenSub * DeltaSeconds), 0.f, 1.f);
+
+    // 중요:
+    // - Smoke(권위)는 NP.UpperSmoke01 + LowerSmoke01(=Upper의 1/4)로 RebuildSmokeFromNP()에서 결정.
+    // - 즉, Smoke를 여기서 직접 누적하지 않습니다.
 }
 
 void ARoomActor::ResetAccumulators()
@@ -360,10 +542,18 @@ void ARoomActor::UpdateRoomState()
     const int32 FireCount = ActiveFires.Num();
     const ERoomState Prev = State;
 
-    if (FireCount <= 0)
-        State = (Heat >= RiskHeatThreshold || Smoke > 0.2f) ? ERoomState::Risk : ERoomState::Idle;
-    else
+    const bool bSmokeDanger = (Smoke >= 0.85f);      // 임계는 튜닝
+    const bool bO2Danger = (Oxygen <= 0.22f);     // “0.2 즈음”
+    const bool bHeatDanger = (Heat >= RiskHeatThreshold);
+
+    if (FireCount > 0)
+    {
         State = ERoomState::Fire;
+    }
+    else
+    {
+        State = (bSmokeDanger || bO2Danger || bHeatDanger) ? ERoomState::Risk : ERoomState::Idle;
+    }
 
     if (Prev != State)
     {
@@ -372,6 +562,8 @@ void ARoomActor::UpdateRoomState()
     }
 }
 
+
+// ============================ Geometry / NP ============================
 bool ARoomActor::IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldPos)
 {
     if (!Box) return false;
@@ -382,11 +574,62 @@ bool ARoomActor::IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldP
         && FMath::Abs(Local.Z) <= Extent.Z;
 }
 
+void ARoomActor::UpdateRoomGeometryFromBounds()
+{
+    if (!IsValid(RoomBounds)) return;
+
+    const FVector Center = RoomBounds->GetComponentLocation();
+    const FVector Extent = RoomBounds->GetScaledBoxExtent();
+
+    FloorZ = Center.Z - Extent.Z;
+    CeilingZ = Center.Z + Extent.Z;
+}
+
+void ARoomActor::UpdateNeutralPlane(float DeltaSeconds)
+{
+    UpdateRoomGeometryFromBounds();
+
+    // 1) UpperSmoke01 accumulate (from AccSmoke)
+    const float FillSlowdown = (1.f - NP.UpperSmoke01);
+    const float Add = AccSmoke * SmokeToUpperFillRate * FillSlowdown * DeltaSeconds;
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 + Add, 0.f, 1.f);
+
+    // 2) Vent remove (문 환기)
+    const float VentRemove = NP.Vent01 * VentSmokeRemoveRate * DeltaSeconds;
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - VentRemove, 0.f, 1.f);
+
+    // ✅ 3) 자연 감쇠(=문 외 vent) 제거
+    // 요구사항: "Door 외 자연 vent 요인 없어야 정상"
+    // -> 여기서 UpperSmoke01을 곱으로 줄이는 처리는 넣지 않습니다.
+
+    // 4) Target height
+    const float MinZ = FloorZ + MinNeutralPlaneFromFloor;
+    const float MaxZ = CeilingZ - MaxNeutralPlaneFromCeiling;
+
+    const float T = FMath::Clamp(NP.UpperSmoke01, 0.f, 1.f);
+    const float EaseT = FMath::Pow(T, 1.2f);
+    const float TargetZ = FMath::Lerp(MaxZ, MinZ, EaseT);
+
+    // 5) Speed
+    const bool bGoingDown = (TargetZ < NP.NeutralPlaneZ);
+    const float Speed = bGoingDown
+        ? NeutralPlaneDropPerSec * (0.25f + 0.75f * T)
+        : NeutralPlaneRisePerSec * (0.25f + 0.75f * NP.Vent01);
+
+    NP.NeutralPlaneZ = FMath::FInterpConstantTo(NP.NeutralPlaneZ, TargetZ, DeltaSeconds, Speed);
+    NP.NeutralPlaneZ = FMath::Clamp(NP.NeutralPlaneZ, MinZ, MaxZ);
+
+    // 6) Upper temperature
+    const float Heat01 = FMath::Clamp(Heat / 600.f, 0.f, 1.f);
+    const float TempTarget = FMath::Lerp(25.f, 650.f, Heat01);
+    NP.UpperTempC = FMath::FInterpTo(NP.UpperTempC, TempTarget, DeltaSeconds, 0.25f);
+}
+
+// ============================ Overlap ============================
 void ARoomActor::OnRoomBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
     UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
-    if (!IsValid(OtherActor)) return;
-    if (OtherActor == this) return;
+    if (!IsValid(OtherActor) || OtherActor == this) return;
 
     UCombustibleComponent* Comb = OtherActor->FindComponentByClass<UCombustibleComponent>();
     if (Comb)
@@ -409,6 +652,7 @@ void ARoomActor::OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* O
     }
 }
 
+// ============================ Ignite helpers ============================
 AFireActor* ARoomActor::IgniteActor(AActor* TargetActor)
 {
     if (!IsValid(TargetActor) || !IsValid(GetWorld())) return nullptr;
@@ -416,7 +660,6 @@ AFireActor* ARoomActor::IgniteActor(AActor* TargetActor)
     UCombustibleComponent* Comb = TargetActor->FindComponentByClass<UCombustibleComponent>();
     if (!Comb) return nullptr;
 
-    // 룸 소속 보장(혹시 누락 대비)
     Comb->SetOwningRoom(this);
 
     if (Comb->IsBurning())
@@ -425,28 +668,22 @@ AFireActor* ARoomActor::IgniteActor(AActor* TargetActor)
     if (Comb->CombustibleType == ECombustibleType::Electric && !Comb->bElectricIgnitionTriggered)
         return nullptr;
 
-    // 여기서 Fire 스폰 + Attach + LinkedCombustible 세팅까지 한 번에 처리
-    AFireActor* NewFire = SpawnFireForCombustible(Comb, Comb->CombustibleType);
-
-    return NewFire;
+    return SpawnFireForCombustible(Comb, Comb->CombustibleType);
 }
 
 AFireActor* ARoomActor::IgniteRandomCombustibleInRoom(bool bAllowElectric)
 {
     TArray<UCombustibleComponent*> List;
-    GetCombustiblesInRoom(List, /*bExcludeBurning*/ true);
+    GetCombustiblesInRoom(List, true);
 
     List.RemoveAll([&](UCombustibleComponent* C)
         {
-            if (!IsValid(C)) return true;
-            if (!IsValid(C->GetOwner())) return true;
-
+            if (!IsValid(C) || !IsValid(C->GetOwner())) return true;
             if (C->CombustibleType == ECombustibleType::Electric)
             {
                 if (!bAllowElectric) return true;
                 if (!C->bElectricIgnitionTriggered) return true;
             }
-
             return false;
         });
 
@@ -459,64 +696,222 @@ AFireActor* ARoomActor::IgniteRandomCombustibleInRoom(bool bAllowElectric)
     return IgniteActor(Pick->GetOwner());
 }
 
-void ARoomActor::UpdateNeutralPlane(float DeltaSeconds)
+// ============================ SmokeVolume (상층/하층 2개) ============================
+void ARoomActor::EnsureSmokeVolumesSpawned()
 {
-    UpdateRoomGeometryFromBounds(); // 룸이 움직이지 않으면 BeginPlay 한 번만 해도 됨
+    if (!bEnableSmokeVolume) return;
+    if (!GetWorld() || !SmokeVolumeClass) return;
 
-    const float RoomHeight = FMath::Max(1.f, CeilingZ - FloorZ);
+    auto SpawnOne = [&](TObjectPtr<AActor>& OutActor,
+        TObjectPtr<UStaticMeshComponent>& OutMesh,
+        TObjectPtr<UMaterialInstanceDynamic>& OutMID,
+        const TCHAR* Tag)
+        {
+            if (IsValid(OutActor)) return;
 
-    // 1) UpperSmoke01 누적: AccSmoke 기반(이미 ApplyAccumulators에서 Smoke도 누적하지만,
-    //    중성대는 "층" 느낌이 중요해서 이번 프레임 생성량을 반영하는게 직관적)
-    //    - SmokeToUpperFillRate는 프로젝트 단위로 맞춰야 함.
-    float Add = AccSmoke * SmokeToUpperFillRate * DeltaSeconds;
-    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 + Add, 0.f, 1.f);
+            UpdateRoomGeometryFromBounds();
 
-    // 2) 환기에 의한 제거(문/창/배연/급기 등)
-    //    - Vent01 0..1
-    const float VentRemove = NP.Vent01 * VentSmokeRemoveRate * DeltaSeconds;
-    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - VentRemove, 0.f, 1.f);
+            const FVector SpawnLoc(GetActorLocation().X, GetActorLocation().Y, CeilingZ - SmokeCeilingAttachOffset);
+            const FTransform TM(FRotator::ZeroRotator, SpawnLoc);
 
-    // 3) 산소가 낮으면 연기/열 생성이 둔화되는 느낌(선택)
-    //    - O2가 낮아져 불이 죽기 시작하면 층도 안정/감소하는 느낌을 줌
-    const float O2Factor = FMath::Clamp(Oxygen / 1.0f, 0.f, 1.f);
-    const float Stability = FMath::Lerp(1.2f, 0.7f, O2Factor); // O2 낮을수록 UpperSmoke01 유지가 약해짐
-    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 * FMath::Pow(0.9995f, DeltaSeconds * 60.f * (2.f - Stability)), 0.f, 1.f);
+            FActorSpawnParameters SP;
+            SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-    // 4) NeutralPlane 목표 높이 계산
-    //    - UpperSmoke01 0이면 천장 바로 아래
-    //    - 1이면 바닥 근처(최소 높이 보장)
-    const float MinZ = FloorZ + MinNeutralPlaneFromFloor;
-    const float MaxZ = CeilingZ - MaxNeutralPlaneFromCeiling;
+            OutActor = GetWorld()->SpawnActor<AActor>(SmokeVolumeClass, TM, SP);
+            if (!IsValid(OutActor)) return;
 
-    const float TargetZ = FMath::Lerp(MaxZ, MinZ, NP.UpperSmoke01);
+            OutActor->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+            OutActor->Tags.Add(FName(Tag));
 
-    // 5) 내려오는 속도/올라가는 속도를 다르게(체감 좋아짐)
-    const bool bGoingDown = (TargetZ < NP.NeutralPlaneZ);
+            OutMesh = OutActor->FindComponentByClass<UStaticMeshComponent>();
+            if (!IsValid(OutMesh))
+            {
+                UE_LOG(LogFire, Error, TEXT("[Room] SmokeVolume(%s) has NO StaticMeshComponent. BP_Smoke에 StaticMeshComponent를 추가하세요."), Tag);
+                return;
+            }
 
-    const float Speed = bGoingDown
-        ? NeutralPlaneDropPerSec * (0.25f + 0.75f * NP.UpperSmoke01)   // 연기 많을수록 더 빨리 내려옴
-        : NeutralPlaneRisePerSec * (0.25f + 0.75f * NP.Vent01);        // 환기 많을수록 더 빨리 올라감
+            OutMID = OutMesh->CreateDynamicMaterialInstance(0);
+            if (!IsValid(OutMID))
+            {
+                UE_LOG(LogFire, Error, TEXT("[Room] CreateDynamicMaterialInstance failed. Tag=%s Room=%s"), Tag, *GetName());
+                return;
+            }
+        };
 
-    NP.NeutralPlaneZ = FMath::FInterpConstantTo(NP.NeutralPlaneZ, TargetZ, DeltaSeconds, Speed);
-
-    // clamp 안전
-    NP.NeutralPlaneZ = FMath::Clamp(NP.NeutralPlaneZ, MinZ, MaxZ);
-
-    // 6) 상층 온도(선택): Heat와 연동해서 Flashover 같은 조건에 사용 가능
-    //    여기선 단순히 Heat 누적을 약하게 반영
-    const float Heat01 = FMath::Clamp(Heat / 600.f, 0.f, 1.f); // 임시 기준
-    const float TempTarget = FMath::Lerp(25.f, 650.f, Heat01); // 임시
-    NP.UpperTempC = FMath::FInterpTo(NP.UpperTempC, TempTarget, DeltaSeconds, 0.25f);
+    SpawnOne(UpperSmokeActor, UpperSmokeMesh, UpperSmokeMID, TEXT("UpperSmoke"));
+    SpawnOne(LowerSmokeActor, LowerSmokeMesh, LowerSmokeMID, TEXT("LowerSmoke"));
 }
 
-void ARoomActor::UpdateRoomGeometryFromBounds()
+void ARoomActor::UpdateSmokeVolumesTransform()
 {
-    if (!IsValid(RoomBounds))
-        return;
+    if (!IsValid(RoomBounds)) return;
+
+    UpdateRoomGeometryFromBounds();
 
     const FVector Center = RoomBounds->GetComponentLocation();
-    const FVector Extent = RoomBounds->GetScaledBoxExtent(); // 월드 스케일 반영
+    const FVector Extent = RoomBounds->GetScaledBoxExtent();
 
-    FloorZ = Center.Z - Extent.Z;
-    CeilingZ = Center.Z + Extent.Z;
+    const float FullX = (Extent.X * 2.f) * SmokeXYInset;
+    const float FullY = (Extent.Y * 2.f) * SmokeXYInset;
+
+    const float TopZ = CeilingZ - SmokeCeilingAttachOffset;
+    const float NPZ = FMath::Clamp(NP.NeutralPlaneZ, FloorZ, TopZ);
+
+    // -------- Upper (Ceiling -> NP) --------
+    const float UpperHeight = FMath::Max(1.f, TopZ - NPZ);
+
+    if (IsValid(UpperSmokeActor))
+    {
+        const float SX = FullX / FMath::Max(1.f, SmokeCubeBaseSize);
+        const float SY = FullY / FMath::Max(1.f, SmokeCubeBaseSize);
+        const float SZ = UpperHeight / FMath::Max(1.f, SmokeCubeBaseSize);
+
+        const float ZMid = TopZ - (UpperHeight * 0.5f);
+
+        UpperSmokeActor->SetActorLocation(FVector(Center.X, Center.Y, ZMid));
+        UpperSmokeActor->SetActorRotation(FRotator::ZeroRotator);
+        UpperSmokeActor->SetActorScale3D(FVector(SX, SY, SZ));
+    }
+
+    // -------- Lower (바닥 근처 얇은 층: 상층 높이의 1/4) --------
+    if (IsValid(LowerSmokeActor))
+    {
+        const float DesiredLowerH = FMath::Max(1.f, UpperHeight * FMath::Clamp(LowerVolumeHeightRatioToUpper, 0.05f, 0.5f));
+        const float RoomH = FMath::Max(1.f, TopZ - FloorZ);
+        const float LowerHeight = FMath::Min(DesiredLowerH, RoomH);
+
+        const float SX = FullX / FMath::Max(1.f, SmokeCubeBaseSize);
+        const float SY = FullY / FMath::Max(1.f, SmokeCubeBaseSize);
+        const float SZ = LowerHeight / FMath::Max(1.f, SmokeCubeBaseSize);
+
+        const float ZMid = FloorZ + (LowerHeight * 0.5f);
+
+        LowerSmokeActor->SetActorLocation(FVector(Center.X, Center.Y, ZMid));
+        LowerSmokeActor->SetActorRotation(FRotator::ZeroRotator);
+        LowerSmokeActor->SetActorScale3D(FVector(SX, SY, SZ));
+    }
+}
+
+void ARoomActor::PushSmokeMaterialParams()
+{
+    // Smoke(최종 합성) 기반으로 불투명 부스트 계산
+    const float S = FMath::Clamp(Smoke, 0.f, 1.f);
+
+    // 0..1로 정규화 (OpaqueStart ~ OpaqueFull)
+    const float Den = FMath::Max(0.0001f, (OpaqueFullSmoke01 - OpaqueStartSmoke01));
+    const float X = FMath::Clamp((S - OpaqueStartSmoke01) / Den, 0.f, 1.f);
+
+    // 임계 이후 급격 상승
+    const float Hard = FMath::Pow(X, FMath::Max(1.f, OpaqueCurvePow));
+
+    // 기본=1, 최대=OpaqueBoostMul
+    const float Boost = FMath::Lerp(1.f, OpaqueBoostMul, Hard);
+
+    if (IsValid(UpperSmokeMID))
+    {
+        UpperSmokeMID->SetScalarParameterValue(TEXT("NeutralPlaneZ"), NP.NeutralPlaneZ);
+        UpperSmokeMID->SetScalarParameterValue(TEXT("FadeHeight"), FMath::Max(1.f, SmokeFadeHeight));
+
+        const float UpperOpacity = UpperSmokeOpacity * Boost * NP.UpperSmoke01;
+        UpperSmokeMID->SetScalarParameterValue(TEXT("Opacity"), FMath::Clamp(UpperOpacity, 0.f, 3.0f));
+    }
+
+    if (IsValid(LowerSmokeMID))
+    {
+        LowerSmokeMID->SetScalarParameterValue(TEXT("NeutralPlaneZ"), NP.NeutralPlaneZ);
+        LowerSmokeMID->SetScalarParameterValue(TEXT("FadeHeight"), FMath::Max(1.f, SmokeFadeHeight));
+
+        const float LowerOpacity = UpperSmokeOpacity * LowerSmokeOpacityScale * Boost * LowerSmoke01;
+        LowerSmokeMID->SetScalarParameterValue(TEXT("Opacity"), FMath::Clamp(LowerOpacity, 0.f, 3.0f));
+    }
+}
+
+// ============================ Backdraft ============================
+bool ARoomActor::CanArmBackdraft() const
+{
+    if (!bEnableBackdraft) return false;
+
+    if (Backdraft.bDisallowWhenRoomOnFire && State == ERoomState::Fire)
+        return false;
+
+    // Smoke는 최종 합성값(Upper+Lower)로 판정
+    if (Smoke < Backdraft.SmokeMin) return false;
+    if (FireValue < Backdraft.FireValueMin) return false;
+    if (Oxygen > Backdraft.O2Max) return false;
+    if (Heat < Backdraft.HeatMin) return false;
+
+    return true;
+}
+
+void ARoomActor::NotifyDoorSealed(bool bSealed)
+{
+    // 멀티 도어에서는 Door->true를 신뢰하지 않음.
+    // false(열림/파손)만 “즉시 리셋” 용도로 사용
+    if (bSealed) return;
+    SealedTime = 0.f;
+    bBackdraftArmed = false;
+}
+
+void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
+{
+    if (!bEnableBackdraft) return;
+
+    const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
+
+    if (bSealedNow && CanArmBackdraft())
+        SealedTime += DeltaSeconds;
+    else
+        SealedTime = 0.f;
+
+    bBackdraftArmed = (SealedTime >= Backdraft.ArmedHoldSeconds);
+}
+
+void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
+{
+    const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+    if (Now - LastBackdraftTime < Backdraft.CooldownSeconds)
+        return;
+
+    if (!bBackdraftArmed)
+        return;
+
+    LastBackdraftTime = Now;
+    bBackdraftArmed = false;
+    SealedTime = 0.f;
+
+    const float Boost = FMath::Clamp(VentBoost01, 0.f, 1.f) * Backdraft.VentBoostOnTrigger;
+    NP.Vent01 = FMath::Clamp(NP.Vent01 + Boost, 0.f, 1.f);
+
+    FireValue += Backdraft.FireValueBoost;
+
+    // 연기 일부 급격 감소(상층 중심)
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - Backdraft.SmokeDropOnTrigger, 0.f, 1.f);
+    LowerSmoke01 = FMath::Clamp(LowerSmoke01 - Backdraft.SmokeDropOnTrigger * 0.25f, 0.f, 1.f);
+
+    OnBackdraft.Broadcast();
+
+    if (bIgniteOnBackdraft)
+    {
+        // 전기 포함 여부는 원하는대로
+        AFireActor* Reignite = IgniteRandomCombustibleInRoom(/*bAllowElectric=*/true);
+        if (IsValid(Reignite))
+        {
+            UE_LOG(LogFire, Warning, TEXT("[Room] Backdraft reignited: %s"), *GetNameSafe(Reignite));
+        }
+    }
+
+    UE_LOG(LogFire, Warning, TEXT("[Room] BACKDRAFT! Room=%s Smoke=%.2f Upper=%.2f Lower=%.2f O2=%.2f FireValue=%.1f Heat=%.1f Vent=%.2f"),
+        *GetName(), Smoke, NP.UpperSmoke01, LowerSmoke01, Oxygen, FireValue, Heat, NP.Vent01);
+}
+
+// Tick()에서 RebuildSmokeFromNP() 이후, UpdateRoomState() 이전 정도에 넣기 추천
+void ARoomActor::ApplyOxygenCapBySmoke(float DeltaSeconds)
+{
+    const float S = FMath::Clamp(Smoke, 0.f, 1.f);
+
+    // Smoke 0 -> 1.0, Smoke 1 -> 0.2
+    const float O2Cap = FMath::Lerp(1.0f, 0.2f, FMath::Pow(S, 1.2f));
+
+    // "상한"만 걸기 (산소를 억지로 올리진 않음)
+    Oxygen = FMath::Min(Oxygen, O2Cap);
 }
