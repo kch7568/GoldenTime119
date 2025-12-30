@@ -32,14 +32,12 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Mesh")
     TObjectPtr<UStaticMeshComponent> BodyMesh;
 
-    // 노즐 회전 피벗 포인트
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Mesh")
     TObjectPtr<USceneComponent> BarrelPivot;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Mesh")
     TObjectPtr<UStaticMeshComponent> BarrelMesh;
 
-    // 레버 회전 피벗 포인트
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Mesh")
     TObjectPtr<USceneComponent> LeverPivot;
 
@@ -75,6 +73,9 @@ public:
     UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "Hose|State")
     bool bIsGrabbedLever = false;
 
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "Hose|State")
+    bool bIsGrabbedBarrel = false;
+
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|State")
     float PressureAlpha = 0.f;
 
@@ -86,6 +87,9 @@ public:
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "Hose|State")
     float BarrelRotation = 0.f;
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "Hose|State")
+    float TargetBarrelRotation = 0.f;
 
     // ============================================================
     // 설정값
@@ -125,10 +129,27 @@ public:
     float PressureDecreaseSpeed = 1.5f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Lever")
-    float LeverMaxRotation = 45.f;
+    float LeverMaxRotation = 70.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Barrel")
+    float BarrelRotationSpeed = 5.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Debug")
     bool bEnableKeyboardTest = true;
+
+    // VR에서 손 위치 저장 (레버 당김 계산용)
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
+    FVector LeverGrabStartLocation;
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
+    TObjectPtr<USceneComponent> GrabbingLeverController;
+
+    // VR에서 노즐 회전 계산용
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
+    float BarrelGrabStartYaw;
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
+    TObjectPtr<USceneComponent> GrabbingBarrelController;
 
     // ============================================================
     // IGrabInteractable 인터페이스 구현
@@ -150,10 +171,16 @@ public:
     void OnBodyReleased();
 
     UFUNCTION(BlueprintCallable, Category = "Hose|VR")
-    void OnLeverGrabbed();
+    void OnLeverGrabbed(USceneComponent* GrabbingController);
 
     UFUNCTION(BlueprintCallable, Category = "Hose|VR")
     void OnLeverReleased();
+
+    UFUNCTION(BlueprintCallable, Category = "Hose|VR")
+    void OnBarrelGrabbed(USceneComponent* GrabbingController);
+
+    UFUNCTION(BlueprintCallable, Category = "Hose|VR")
+    void OnBarrelReleased();
 
     UFUNCTION(BlueprintCallable, Category = "Hose|VR")
     void SetLeverPull(float PullAmount);
@@ -187,17 +214,19 @@ protected:
 private:
     void SetupKeyboardTest();
     void UpdatePressure(float DeltaSeconds);
+    void UpdateBarrelRotation(float DeltaSeconds);
     void UpdateLeverVisual();
     void UpdateBarrelVisual();
     void UpdateWaterVFX();
     void UpdateMode();
+    void UpdateVRLeverFromController();
+    void UpdateVRBarrelFromController();
     void CalculateWaterPath(TArray<FVector>& OutPoints);
     void TraceAlongWaterPath(float DeltaSeconds);
 
     FVector GetNozzleLocation() const;
     FVector GetNozzleForward() const;
 
-    FTransform InitialLeverTransform;
     bool bInputBound = false;
     bool bTestFiring = false;
 };

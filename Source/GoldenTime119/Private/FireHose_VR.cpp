@@ -2,6 +2,7 @@
 #include "FireHose_VR.h"
 #include "CombustibleComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/PlayerController.h"
@@ -16,32 +17,32 @@ AFireHose_VR::AFireHose_VR()
     Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
     SetRootComponent(Root);
 
-    // BodyMesh - 메인 몸체
+    // BodyMesh
     BodyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BodyMesh"));
     BodyMesh->SetupAttachment(Root);
 
-    // BarrelPivot - 노즐 회전 중심점
+    // BarrelPivot
     BarrelPivot = CreateDefaultSubobject<USceneComponent>(TEXT("BarrelPivot"));
     BarrelPivot->SetupAttachment(BodyMesh);
 
-    // BarrelMesh - 노즐 헤드 (BarrelPivot의 자식)
+    // BarrelMesh
     BarrelMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BarrelMesh"));
     BarrelMesh->SetupAttachment(BarrelPivot);
 
-    // WaterSpawnPoint - 물 발사 위치
+    // WaterSpawnPoint
     WaterSpawnPoint = CreateDefaultSubobject<USceneComponent>(TEXT("WaterSpawnPoint"));
     WaterSpawnPoint->SetupAttachment(BarrelMesh);
 
-    // WaterPsc - 물 VFX
+    // WaterPsc
     WaterPsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("WaterPSC"));
     WaterPsc->SetupAttachment(WaterSpawnPoint);
     WaterPsc->bAutoActivate = false;
 
-    // LeverPivot - 레버 회전 중심점 (힌지)
+    // LeverPivot
     LeverPivot = CreateDefaultSubobject<USceneComponent>(TEXT("LeverPivot"));
     LeverPivot->SetupAttachment(BodyMesh);
 
-    // LeverMesh - 레버 (LeverPivot의 자식)
+    // LeverMesh
     LeverMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("LeverMesh"));
     LeverMesh->SetupAttachment(LeverPivot);
 }
@@ -86,7 +87,19 @@ void AFireHose_VR::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
+    // VR: 손 위치에 따라 레버/노즐 업데이트
+    if (bIsGrabbedLever && IsValid(GrabbingLeverController))
+    {
+        UpdateVRLeverFromController();
+    }
+
+    if (bIsGrabbedBarrel && IsValid(GrabbingBarrelController))
+    {
+        UpdateVRBarrelFromController();
+    }
+
     UpdatePressure(DeltaSeconds);
+    UpdateBarrelRotation(DeltaSeconds);
     UpdateMode();
 
     bool bShouldFire = (bIsGrabbedBody || bTestFiring) && (PressureAlpha > 0.01f);
@@ -105,10 +118,26 @@ void AFireHose_VR::OnGrabbed_Implementation(USceneComponent* GrabbingController,
 {
     if (bIsLeftHand)
     {
-        OnLeverGrabbed();
+        // 왼손: 레버 또는 노즐 (거리에 따라 결정)
+        FVector HandLocation = GrabbingController->GetComponentLocation();
+        FVector LeverLocation = LeverMesh->GetComponentLocation();
+        FVector BarrelLocation = BarrelMesh->GetComponentLocation();
+
+        float DistToLever = FVector::Dist(HandLocation, LeverLocation);
+        float DistToBarrel = FVector::Dist(HandLocation, BarrelLocation);
+
+        if (DistToLever < DistToBarrel)
+        {
+            OnLeverGrabbed(GrabbingController);
+        }
+        else
+        {
+            OnBarrelGrabbed(GrabbingController);
+        }
     }
     else
     {
+        // 오른손: 몸체
         OnBodyGrabbed();
     }
 }
@@ -117,7 +146,14 @@ void AFireHose_VR::OnReleased_Implementation(USceneComponent* GrabbingController
 {
     if (bIsLeftHand)
     {
-        OnLeverReleased();
+        if (bIsGrabbedLever)
+        {
+            OnLeverReleased();
+        }
+        if (bIsGrabbedBarrel)
+        {
+            OnBarrelReleased();
+        }
     }
     else
     {
@@ -159,36 +195,96 @@ void AFireHose_VR::OnBodyReleased()
     UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Body Released"));
 }
 
-void AFireHose_VR::OnLeverGrabbed()
+void AFireHose_VR::OnLeverGrabbed(USceneComponent* GrabbingController)
 {
     bIsGrabbedLever = true;
+    GrabbingLeverController = GrabbingController;
+    LeverGrabStartLocation = GrabbingController->GetComponentLocation();
+
     UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Lever Grabbed (Left Hand)"));
 }
 
 void AFireHose_VR::OnLeverReleased()
 {
     bIsGrabbedLever = false;
+    GrabbingLeverController = nullptr;
     TargetPressure = 0.f;
+
     UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Lever Released - Pressure decreasing"));
+}
+
+void AFireHose_VR::OnBarrelGrabbed(USceneComponent* GrabbingController)
+{
+    bIsGrabbedBarrel = true;
+    GrabbingBarrelController = GrabbingController;
+    BarrelGrabStartYaw = GrabbingController->GetComponentRotation().Yaw;
+
+    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Barrel Grabbed (Left Hand)"));
+}
+
+void AFireHose_VR::OnBarrelReleased()
+{
+    bIsGrabbedBarrel = false;
+    GrabbingBarrelController = nullptr;
+
+    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Barrel Released"));
+}
+
+void AFireHose_VR::UpdateVRLeverFromController()
+{
+    if (!IsValid(GrabbingLeverController)) return;
+
+    FVector CurrentLocation = GrabbingLeverController->GetComponentLocation();
+    FVector LeverPivotLocation = LeverPivot->GetComponentLocation();
+
+    // 손이 피벗에서 얼마나 당겨졌는지 계산
+    FVector PullDirection = LeverPivotLocation - LeverGrabStartLocation;
+    PullDirection.Normalize();
+
+    FVector CurrentPull = CurrentLocation - LeverGrabStartLocation;
+    float PullDistance = FVector::DotProduct(CurrentPull, -GetActorUpVector());
+
+    // 당김 거리를 0~1로 변환 (10cm = 100% 당김)
+    float PullAmount = FMath::Clamp(PullDistance / 10.f, 0.f, 1.f);
+
+    SetLeverPull(PullAmount);
+}
+
+void AFireHose_VR::UpdateVRBarrelFromController()
+{
+    if (!IsValid(GrabbingBarrelController)) return;
+
+    float CurrentYaw = GrabbingBarrelController->GetComponentRotation().Yaw;
+    float YawDelta = CurrentYaw - BarrelGrabStartYaw;
+
+    // Yaw 변화를 노즐 회전으로 변환
+    float NewRotation = BarrelRotation + YawDelta;
+    NewRotation = FMath::Clamp(NewRotation, 0.f, 180.f);
+
+    SetBarrelRotation(NewRotation);
+
+    // 시작 Yaw 업데이트 (연속 회전 가능하도록)
+    BarrelGrabStartYaw = CurrentYaw;
 }
 
 void AFireHose_VR::SetLeverPull(float PullAmount)
 {
     LeverPullAmount = FMath::Clamp(PullAmount, 0.f, 1.f);
-
-    if (bIsGrabbedLever)
-    {
-        TargetPressure = LeverPullAmount;
-    }
+    TargetPressure = LeverPullAmount;
 
     UpdateLeverVisual();
 }
 
 void AFireHose_VR::SetBarrelRotation(float RotationDegrees)
 {
-    BarrelRotation = FMath::Clamp(RotationDegrees, 0.f, 180.f);
-    UpdateBarrelVisual();
-    UpdateMode();
+    TargetBarrelRotation = FMath::Clamp(RotationDegrees, 0.f, 180.f);
+
+    // VR에서는 즉시 적용
+    if (bIsGrabbedBarrel)
+    {
+        BarrelRotation = TargetBarrelRotation;
+        UpdateBarrelVisual();
+    }
 }
 
 // ============================================================
@@ -207,8 +303,7 @@ void AFireHose_VR::SetMode(EHoseMode_VR NewMode)
     if (CurrentMode != NewMode)
     {
         CurrentMode = NewMode;
-        BarrelRotation = (NewMode == EHoseMode_VR::Focused) ? 0.f : 180.f;
-        UpdateBarrelVisual();
+        TargetBarrelRotation = (NewMode == EHoseMode_VR::Focused) ? 0.f : 180.f;
         UpdateWaterVFX();
 
         UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode: %s"),
@@ -252,8 +347,12 @@ void AFireHose_VR::UpdatePressure(float DeltaSeconds)
 
     PressureAlpha = FMath::Clamp(PressureAlpha, 0.f, 1.f);
 
-    LeverPullAmount = PressureAlpha;
-    UpdateLeverVisual();
+    // PC 테스트: 수압에 따라 레버 시각적 업데이트
+    if (bTestFiring || !bIsGrabbedLever)
+    {
+        LeverPullAmount = PressureAlpha;
+        UpdateLeverVisual();
+    }
 
     if (IsValid(WaterPsc))
     {
@@ -276,25 +375,40 @@ void AFireHose_VR::UpdatePressure(float DeltaSeconds)
     }
 }
 
-void AFireHose_VR::UpdateLeverVisual()
+void AFireHose_VR::UpdateBarrelRotation(float DeltaSeconds)
 {
-    if (!IsValid(LeverPivot)) return;
-
-    // LeverPivot을 회전 (Pitch 축 - 당기는 동작)
-    float RotationAngle = LeverPullAmount * LeverMaxRotation;
-    FRotator NewRotation = FRotator::ZeroRotator;
-    NewRotation.Pitch = -RotationAngle;
-    LeverPivot->SetRelativeRotation(NewRotation);
+    // PC 테스트: 부드러운 노즐 회전 애니메이션
+    if (!bIsGrabbedBarrel)
+    {
+        BarrelRotation = FMath::FInterpTo(BarrelRotation, TargetBarrelRotation, DeltaSeconds, BarrelRotationSpeed);
+        UpdateBarrelVisual();
+    }
 }
 
+// 1. 헤드(노즐) 부분 업데이트: Z축(Yaw) 회전
 void AFireHose_VR::UpdateBarrelVisual()
 {
     if (!IsValid(BarrelPivot)) return;
 
-    // BarrelPivot을 회전 (Roll 축 - 돌리는 동작)
     FRotator NewRotation = FRotator::ZeroRotator;
-    NewRotation.Roll = BarrelRotation;
+    // 기존 Roll(X)에서 Yaw(Z)로 변경
+    NewRotation.Yaw = BarrelRotation;
     BarrelPivot->SetRelativeRotation(NewRotation);
+}
+
+// 2. 손잡이(레버) 부분 업데이트: Y축(Pitch) 회전 및 -70도 제한
+void AFireHose_VR::UpdateLeverVisual()
+{
+    if (!IsValid(LeverPivot)) return;
+
+    // LeverPullAmount(0~1)에 최대 회전각을 곱함
+    // LeverMaxRotation 값을 70.0f로 설정하면 0 ~ -70도 사이를 움직이게 됩니다.
+    float RotationAngle = LeverPullAmount * LeverMaxRotation;
+
+    FRotator NewRotation = FRotator::ZeroRotator;
+    // Y축 회전(Pitch) 적용
+    NewRotation.Pitch = RotationAngle;
+    LeverPivot->SetRelativeRotation(NewRotation);
 }
 
 void AFireHose_VR::UpdateWaterVFX()
