@@ -6,20 +6,30 @@
 #include "DoorActor.generated.h"
 
 class ARoomActor;
+class USceneComponent;
+class UParticleSystem;
+class UParticleSystemComponent;
 
 UENUM(BlueprintType)
 enum class EDoorState : uint8
 {
-    Closed     UMETA(DisplayName = "Closed"),
-    Open       UMETA(DisplayName = "Open"),
-    Breached   UMETA(DisplayName = "Breached"),
+    Closed   UMETA(DisplayName = "Closed"),
+    Open     UMETA(DisplayName = "Open"),
+    Breached UMETA(DisplayName = "Breached"),
 };
 
 UENUM(BlueprintType)
 enum class EDoorLinkType : uint8
 {
-    RoomToRoom     UMETA(DisplayName = "Room ↔ Room"),
-    RoomToOutside  UMETA(DisplayName = "Room ↔ Outside"),
+    RoomToRoom     UMETA(DisplayName = "RoomToRoom"),
+    RoomToOutside  UMETA(DisplayName = "RoomToOutside"),
+};
+
+UENUM(BlueprintType)
+enum class EDoorOpenDirection : uint8
+{
+    PositiveYaw UMETA(DisplayName = "PositiveYaw"),
+    NegativeYaw UMETA(DisplayName = "NegativeYaw"),
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDoorStateChanged, EDoorState, NewState);
@@ -33,85 +43,91 @@ class GOLDENTIME119_API ADoorActor : public AActor
 public:
     ADoorActor();
 
-    // ===== Link =====
-    // 기본: RoomA 필수. RoomB가 null이면 Outside로 보정됨.
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Link")
-    EDoorLinkType LinkType = EDoorLinkType::RoomToRoom;
-
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Link")
-    TObjectPtr<ARoomActor> RoomA = nullptr;
-
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Link", meta = (EditCondition = "LinkType==EDoorLinkType::RoomToRoom"))
-    TObjectPtr<ARoomActor> RoomB = nullptr;
-
-    // (호환용) 기존 BP에서 OwningRoom만 쓰던 경우 자동 매핑
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Legacy", meta = (DisplayName = "OwningRoom (Legacy)"))
+    // ===== Rooms =====
+    // Legacy: 과거 코드에서 OwningRoom을 쓰던 경우를 RoomA로 매핑
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Link")
     TObjectPtr<ARoomActor> OwningRoom = nullptr;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Link")
+    TObjectPtr<ARoomActor> RoomA = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Link")
+    TObjectPtr<ARoomActor> RoomB = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Link")
+    EDoorLinkType LinkType = EDoorLinkType::RoomToRoom;
+
     // ===== State =====
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door|State")
     EDoorState DoorState = EDoorState::Closed;
 
-    // 0..1 (0=닫힘, 1=완전개방)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|State", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float OpenAmount01 = 0.f;
 
-    // ===== Vent =====
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Vent", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float VentMax = 1.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|State", meta = (ClampMin = "0.0", ClampMax = "0.2"))
+    float ClosedDeadzone01 = 0.02f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Vent", meta = (ClampMin = "0.1", ClampMax = "4.0"))
+    // ===== Vent/Leak =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Vent", meta = (ClampMin = "0.1", ClampMax = "6.0"))
     float VentPow = 1.6f;
 
-    // 닫혀있을 때 틈새 누출(연기 VFX량)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Vent", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float VentMax = 1.0f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Leak", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float LeakMax = 0.35f;
+    float LeakMax = 0.08f; // 완전 밀폐라도 아주 미세 누설(원하면 0)
 
-    // “닫힘” 판정 데드존 (OpenAmount가 아주 작은 값일 때 Closed로 간주)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Seal", meta = (ClampMin = "0.0", ClampMax = "0.2"))
-    float ClosedDeadzone01 = 0.01f;
+    // ===== Door visual(hinge) =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual")
+    FName HingeComponentName = TEXT("Hinge");
 
-    // ===== Debug (Non-VR) =====
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual")
+    EDoorOpenDirection OpenDirection = EDoorOpenDirection::PositiveYaw;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual")
+    float MaxOpenYawDeg = 110.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual")
+    float ClosedYawOffsetDeg = 0.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual", meta = (ClampMin = "0.0", ClampMax = "60.0"))
+    float VisualInterpSpeed = 12.f;
+
+    // ===== Debug =====
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Debug")
     bool bEnableDebugOpen = true;
 
-    // 2번 키를 누르면 열기 시작, 천천히 OpenAmount 증가
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Debug")
-    float DebugOpenSpeed = 0.4f; // 초당 OpenAmount 증가량
+    float DebugOpenSpeed = 0.35f;
 
-    // ===== Events (BP에서 VFX/SFX 연결) =====
+    // ===== Events =====
     UPROPERTY(BlueprintAssignable, Category = "Door|Event")
     FDoorStateChanged OnDoorStateChanged;
 
     UPROPERTY(BlueprintAssignable, Category = "Door|Event")
     FDoorOpenAmountChanged OnDoorOpenAmountChanged;
 
-public:
     // ===== API =====
-    UFUNCTION(BlueprintCallable, Category = "Door")
-    void SetOpenAmount01(float InOpen01);
-
-    UFUNCTION(BlueprintCallable, Category = "Door")
-    void SetClosed();
-
-    UFUNCTION(BlueprintCallable, Category = "Door")
-    void SetBreached();
-
-    UFUNCTION(BlueprintCallable, Category = "Door")
-    bool IsSealed() const { return DoorState == EDoorState::Closed; }
-
-    UFUNCTION(BlueprintCallable, Category = "Door")
+    UFUNCTION(BlueprintCallable, Category = "Door|Vent")
     float ComputeVent01() const;
 
-    UFUNCTION(BlueprintCallable, Category = "Door")
+    UFUNCTION(BlueprintCallable, Category = "Door|Leak")
     float ComputeLeak01() const;
 
-    // ===== Link query for RoomActor =====
     UFUNCTION(BlueprintCallable, Category = "Door|Link")
     ARoomActor* GetOtherRoom(const ARoomActor* From) const;
 
     UFUNCTION(BlueprintCallable, Category = "Door|Link")
     bool IsOutsideConnectionFor(const ARoomActor* From) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Door|State")
+    void SetOpenAmount01(float InOpen01);
+
+    UFUNCTION(BlueprintCallable, Category = "Door|State")
+    void SetClosed();
+
+    UFUNCTION(BlueprintCallable, Category = "Door|State")
+    void SetBreached();
 
 protected:
     virtual void BeginPlay() override;
@@ -119,12 +135,82 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-    void ApplyStateByOpenAmount();
-    void SyncRoomRegistration(bool bRegister);
-    void NotifyRoomsDoorOpenedOrBreached(); // 열림/파손 시 방 sealed 리셋 힌트
-    void TryTriggerBackdraftIfNeeded(bool bFromBreach);
+    // hinge cache
+    UPROPERTY() TObjectPtr<USceneComponent> CachedHinge = nullptr;
+    float VisualYawCurrent = 0.f;
+
+    // debug opening flags
+    bool bDebugOpening = false;
+    bool bDebugClosing = false;
+
+    // edge tracking
+    EDoorState PrevStateForEdge = EDoorState::Closed;
 
 private:
-    EDoorState PrevStateForEdge = EDoorState::Closed;
-    bool bDebugOpening = false;
+    void CacheHingeComponent();
+    void ApplyDoorVisual(float DeltaSeconds);
+    void ApplyStateByOpenAmount();
+
+    // Room registration
+    void SyncRoomRegistration(bool bRegister);
+    void NotifyRoomsDoorOpenedOrBreached();
+    void TryTriggerBackdraftIfNeeded(bool bFromBreach);
+
+    // ===== Door VFX =====
+private:
+    UPROPERTY(EditAnywhere, Category = "Door|VFX")
+    TObjectPtr<UParticleSystem> SmokeLeakTemplate = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "Door|VFX")
+    TObjectPtr<UParticleSystem> BackdraftTemplate = nullptr;
+
+    UPROPERTY(VisibleAnywhere, Category = "Door|VFX")
+    TObjectPtr<UParticleSystemComponent> SmokeLeakPSC = nullptr;
+
+    UPROPERTY(VisibleAnywhere, Category = "Door|VFX")
+    TObjectPtr<UParticleSystemComponent> BackdraftPSC = nullptr;
+
+    UPROPERTY(EditAnywhere, Category = "Door|VFX")
+    FName LeakParamName = TEXT("LeakVal");     // 단일 파라미터
+
+    UPROPERTY(EditAnywhere, Category = "Door|VFX")
+    FName BackdraftScaleParamName = TEXT("Scale"); // 단일 파라미터
+
+    // Leak 방향 오프셋(문 기준 로컬 Right 방향)
+    UPROPERTY(EditAnywhere, Category = "Door|VFX", meta = (ClampMin = "0.0", ClampMax = "100.0"))
+    float LeakSideOffsetCm = 25.f;
+
+    // Leak 값 스무딩
+    UPROPERTY(EditAnywhere, Category = "Door|VFX", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+    float LeakInterpSpeed = 10.f;
+
+    // Backdraft 시 문 확 열림
+    UPROPERTY(EditAnywhere, Category = "Door|Backdraft")
+    bool bForceOpenOnBackdraft = true;
+
+    // 내부 상태(방별)
+    float LeakFromRoomA01 = 0.f;
+    float LeakFromRoomB01 = 0.f;
+
+    // 최종 출력
+    float LeakValSmoothed = 0.f;
+
+private:
+    void EnsureDoorVfx();
+    void BindRoomSignals(bool bBind);
+
+    void UpdateDoorVfx(float DeltaSeconds);
+    void SetLeakSideToRoomA();
+    void SetLeakSideToRoomB();
+    void SetLeakSideToOutsideFromRoomA(); // RoomToOutside에서 RoomA 기준 바깥쪽
+
+    // Room 이벤트 수신
+    UFUNCTION()
+    void OnRoomABackdraftLeakStrength(float Leak01);
+
+    UFUNCTION()
+    void OnRoomBBackdraftLeakStrength(float Leak01);
+
+    UFUNCTION()
+    void OnRoomBackdraftTriggered(); // 어느 방이든 Trigger되면 호출되게 바인딩(둘 다 같은 핸들러로 가능)
 };

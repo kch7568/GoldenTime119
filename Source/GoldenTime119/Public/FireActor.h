@@ -4,16 +4,14 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "CombustibleType.h"
-#include "RoomActor.h" // FFireRuntimeTuning
-#include "Particles/ParticleSystemComponent.h"
-#include "Particles/ParticleSystem.h"
-#include "Components/PointLightComponent.h"
+#include "FireRuntimeTuning.h" // 분리 헤더
 #include "FireActor.generated.h"
 
 class ARoomActor;
 class USceneComponent;
 class UCombustibleComponent;
-class UPointLightComponent;
+class UParticleSystem;
+class UParticleSystemComponent;
 
 UCLASS()
 class GOLDENTIME119_API AFireActor : public AActor
@@ -23,9 +21,14 @@ class GOLDENTIME119_API AFireActor : public AActor
 public:
     AFireActor();
 
+    // ===== Components =====
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fire|Component")
     TObjectPtr<USceneComponent> Root = nullptr;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fire|VFX")
+    TObjectPtr<UParticleSystemComponent> FirePsc = nullptr;
+
+    // ===== Runtime Data =====
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Data")
     FGuid FireID;
 
@@ -38,12 +41,14 @@ public:
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Data")
     ECombustibleType CombustibleType = ECombustibleType::Normal;
 
+    // ===== Intensity =====
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Intensity")
     float BaseIntensity = 1.0f;
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Intensity")
     float EffectiveIntensity = 1.0f;
 
+    // ===== Spread / Timing =====
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Spread")
     float CurrentSpreadRadius = 350.f;
 
@@ -53,27 +58,24 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Timing")
     float InfluenceInterval = 0.5f;
 
-    UPROPERTY(EditAnywhere, Category = "VFX")
-    float IgniteRampSeconds = 1.25f;
-
-    UPROPERTY(VisibleAnywhere, Category = "VFX")
-    float SpawnAge = 0.f;              // 스폰 후 경과
-
-    UPROPERTY(VisibleAnywhere, Category = "VFX")
-    TObjectPtr<UParticleSystemComponent> FirePsc = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "VFX")
+    // ===== VFX =====
+    UPROPERTY(EditAnywhere, Category = "Fire|VFX")
     TObjectPtr<UParticleSystem> FireTemplate = nullptr;
 
-    UPROPERTY(VisibleInstanceOnly, Category = "VFX")
+    UPROPERTY(EditAnywhere, Category = "Fire|VFX")
+    float IgniteRampSeconds = 1.25f;
+
+    UPROPERTY(VisibleAnywhere, Category = "Fire|VFX")
+    float SpawnAge = 0.f;
+
+    UPROPERTY(VisibleInstanceOnly, Category = "Fire|VFX")
     float Strength01 = 1.f;
 
-    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|VFX")
-    float FireVfxScale01 = 0.f;
+    // (옵션) BP가 참고할 수 있는 최종 스케일
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Backdraft")
+    float BackdraftScale01 = 1.f;
 
-    void UpdateVfx(float DeltaSeconds);
-
-    // 스폰 파라미터(방어)
+    // ===== Spawn Params (ExposeOnSpawn) =====
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ExposeOnSpawn = true), Category = "Fire|Spawn")
     TObjectPtr<ARoomActor> SpawnRoom = nullptr;
 
@@ -83,11 +85,13 @@ public:
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Data")
     TWeakObjectPtr<AActor> IgnitedTarget = nullptr;
 
+public:
     void InitFire(ARoomActor* InRoom, ECombustibleType InType);
 
     UFUNCTION(BlueprintCallable, Category = "Fire")
     FVector GetSpreadOrigin() const;
 
+    UFUNCTION(BlueprintCallable, Category = "Fire")
     void Extinguish();
 
 protected:
@@ -101,15 +105,15 @@ private:
     bool bInitialized = false;
     bool bIsActive = false;
 
-    static constexpr float WaterDecayPerSec = 1.25f; // 물 입력은 금방 사라지게(취향)
-    float PendingWater01 = 0.f; // <- 클래스 멤버로 넣으세요 (private)
-
 private:
-    void UpdateRuntimeFromRoom();
+    void UpdateRuntimeFromRoom(float DeltaSeconds);
     void SubmitInfluenceToRoom();
-    void ApplyToOwnerCombustible();   // 연료 소비 등
-    void SpreadPressureToNeighbors(); // 주변 가연물에 “압력”만 전달
+    void ApplyToOwnerCombustible();
+    void SpreadPressureToNeighbors();
 
     bool ShouldExtinguish() const;
+    void UpdateVfx(float DeltaSeconds);
 
+    // ===== Helpers =====
+    float GetCombustionScaleFromRoom() const; // Backdraft ready 등
 };

@@ -149,6 +149,8 @@ void ARoomActor::Tick(float DeltaSeconds)
     if (bEnableBackdraft)
         EvaluateBackdraftArming(DeltaSeconds);
 
+    UpdateBackdraftReadyAndLeak(DeltaSeconds);
+
     // 8) Smoke Volumes
     if (bEnableSmokeVolume)
     {
@@ -866,6 +868,60 @@ void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
     bBackdraftArmed = (SealedTime >= Backdraft.ArmedHoldSeconds);
 }
 
+float ARoomActor::ComputeBackdraftLeakStrength01() const
+{
+    // Ready가 아니면 누출 연출 없음
+    if (!bBackdraftReady) return 0.f;
+
+    const float S = FMath::Clamp(Smoke, 0.f, 1.f);
+
+    // Smoke가 Start 이상일 때부터 0->1로 상승
+    const float Den = FMath::Max(0.0001f, (BackdraftLeakFullSmoke01 - BackdraftLeakStartSmoke01));
+    const float X = FMath::Clamp((S - BackdraftLeakStartSmoke01) / Den, 0.f, 1.f);
+
+    // 임계 이후 “훅” 올라가게
+    const float Hard = FMath::Pow(X, FMath::Max(0.1f, BackdraftLeakCurvePow));
+    return FMath::Clamp(Hard, 0.f, 1.f);
+}
+
+void ARoomActor::UpdateBackdraftReadyAndLeak(float DeltaSeconds)
+{
+    // Backdraft 기능 OFF면 Ready 강제 해제
+    if (!bEnableBackdraft)
+    {
+        if (bBackdraftReady)
+        {
+            bBackdraftReady = false;
+            OnBackdraftReadyChanged.Broadcast(false);
+            OnBackdraftLeakStrength.Broadcast(0.f);
+        }
+        return;
+    }
+
+    // "Ready" 정의:
+    // - (1) sealed 상태여야 함 (Vent 거의 0)
+    // - (2) Backdraft 조건을 만족해야 함 (Smoke/FireValue/O2/Heat)
+    // - (3) 아직 터지기 전(Armed 되기 전) ~ Armed 직전까지 연출/연소 억제
+    //
+    // 여기서는 "CanArmBackdraft() && bSealedNow"를 Ready로 잡고,
+    // Armed가 되면 Ready는 유지해도 되고(문틈 연기 계속) / 끄고 싶으면 끄면 됩니다.
+    const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
+    const bool bCanArm = CanArmBackdraft();
+
+    // 기본 정책: sealed + canarm 이면 Ready ON
+    const bool bNewReady = (bSealedNow && bCanArm);
+
+    if (bNewReady != bBackdraftReady)
+    {
+        bBackdraftReady = bNewReady;
+        OnBackdraftReadyChanged.Broadcast(bBackdraftReady);
+    }
+
+    // 누출 강도는 Ready 중에만 의미 있음
+    const float Leak01 = ComputeBackdraftLeakStrength01();
+    OnBackdraftLeakStrength.Broadcast(Leak01);
+}
+
 void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
 {
     const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
@@ -878,6 +934,13 @@ void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
     LastBackdraftTime = Now;
     bBackdraftArmed = false;
     SealedTime = 0.f;
+
+    if (bBackdraftReady)
+    {
+        bBackdraftReady = false;
+        OnBackdraftReadyChanged.Broadcast(false);
+        OnBackdraftLeakStrength.Broadcast(0.f);
+    }
 
     const float Boost = FMath::Clamp(VentBoost01, 0.f, 1.f) * Backdraft.VentBoostOnTrigger;
     NP.Vent01 = FMath::Clamp(NP.Vent01 + Boost, 0.f, 1.f);

@@ -3,7 +3,9 @@
 
 #include "RoomActor.h"
 #include "CombustibleComponent.h"
+
 #include "Components/SceneComponent.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFire, Log, All);
@@ -61,22 +63,10 @@ void AFireActor::BeginPlay()
     if (IsValid(FirePsc))
     {
         if (FireTemplate)
-        {
             FirePsc->SetTemplate(FireTemplate);
-        }
+
         FirePsc->ActivateSystem(true);
-
-        UE_LOG(LogFire, Warning, TEXT("[Fire] VFX Activated! Template=%s"), *GetNameSafe(FireTemplate));
     }
-
-    UE_LOG(LogFire, Error, TEXT("[Fire] BeginPlay Location=%s"), *GetActorLocation().ToString());
-
-    if (IgnitedTarget.IsValid())
-    {
-        UE_LOG(LogFire, Error, TEXT("[Fire] Target Location=%s"), *IgnitedTarget->GetActorLocation().ToString());
-    }
-
-    if (FireTemplate) FirePsc->SetTemplate(FireTemplate);
 
     if (!bInitialized)
     {
@@ -91,7 +81,7 @@ void AFireActor::BeginPlay()
         return;
     }
 
-    // (중요) 혹시 LinkedCombustible 누락이면 타겟에서 복구
+    // (중요) LinkedCombustible 누락이면 타겟에서 복구
     if (!IsValid(LinkedCombustible))
     {
         AActor* TargetActor = IgnitedTarget.Get();
@@ -111,27 +101,23 @@ void AFireActor::BeginPlay()
     }
 
     if (IsValid(LinkedCombustible))
-    {
         LinkedCombustible->EnsureFuelInitialized();
 
-        UE_LOG(LogFire, Warning, TEXT("[Fire] FuelAtBeginPlay Owner=%s Init=%.2f Cur=%.2f"),
-            *GetNameSafe(LinkedCombustible->GetOwner()),
-            LinkedCombustible->Fuel.FuelInitial,
-            LinkedCombustible->Fuel.FuelCurrent);
-    }
-
     LinkedRoom->RegisterFire(this);
-    UpdateRuntimeFromRoom();
+
+    // 초기 런타임 세팅
+    UpdateRuntimeFromRoom(0.f);
 }
 
 void AFireActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
-    // VFX 업데이트는 상태와 상관없이 항상 수행
+    // VFX는 항상 갱신
     UpdateVfx(DeltaSeconds);
 
-    if (!bIsActive) return;
+    if (!bIsActive)
+        return;
 
     if (ShouldExtinguish())
     {
@@ -140,8 +126,8 @@ void AFireActor::Tick(float DeltaSeconds)
     }
 
     SpawnAge += DeltaSeconds;
-    UpdateRuntimeFromRoom();
 
+    UpdateRuntimeFromRoom(DeltaSeconds);
 
     InfluenceAcc += DeltaSeconds;
     if (InfluenceAcc >= InfluenceInterval)
@@ -162,101 +148,123 @@ void AFireActor::Tick(float DeltaSeconds)
 bool AFireActor::ShouldExtinguish() const
 {
     if (!IsValid(LinkedRoom))
-    {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] ExtinguishReason: LinkedRoom invalid"));
         return true;
-    }
 
     if (!LinkedRoom->CanSustainFire())
-    {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] ExtinguishReason: Oxygen low (O2=%.2f, Th=%.2f)"),
-            LinkedRoom->Oxygen, LinkedRoom->MinOxygenToSustain);
         return true;
-    }
 
     if (IsValid(LinkedCombustible))
     {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] FuelCheck Owner=%s Init=%.2f Cur=%.2f"),
-            *GetNameSafe(LinkedCombustible->GetOwner()),
-            LinkedCombustible->Fuel.FuelInitial,
-            LinkedCombustible->Fuel.FuelCurrent);
-
         if (LinkedCombustible->Fuel.FuelCurrent <= 0.f)
-        {
-            UE_LOG(LogFire, Warning, TEXT("[Fire] ExtinguishReason: Fuel empty (%.2f)"), LinkedCombustible->Fuel.FuelCurrent);
             return true;
-        }
-    }
-    else
-    {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] ExtinguishReason: LinkedCombustible invalid"));
-        // 여기서 즉시 끄고 싶지 않으면 return false로 두는 것도 방법
     }
 
     return false;
 }
 
-
-void AFireActor::UpdateRuntimeFromRoom()
+float AFireActor::GetCombustionScaleFromRoom() const
 {
-    if (!IsValid(LinkedRoom)) return;
+    if (!IsValid(LinkedRoom))
+        return 1.f;
+
+    // RoomActor.h에 이미 제공: GetBackdraftCombustionScale01()
+    const float S = LinkedRoom->GetBackdraftCombustionScale01();
+    return FMath::Clamp(S, 0.f, 1.f);
+}
+
+void AFireActor::UpdateRuntimeFromRoom(float /*DeltaSeconds*/)
+{
+    if (!IsValid(LinkedRoom))
+        return;
 
     float FuelRatio01 = 1.f;
     float ExtinguishAlpha = 0.f;
+
     if (IsValid(LinkedCombustible))
     {
         FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
         ExtinguishAlpha = LinkedCombustible->ExtinguishAlpha01;
     }
 
+    // Backdraft ready면 연소/확산/영향 모두 스케일 다운
+    BackdraftScale01 = GetCombustionScaleFromRoom();
+
     FFireRuntimeTuning T;
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    // 물에 의해 진압 중이라면 확산 반경을 줄임
-    CurrentSpreadRadius = T.SpreadRadius * FMath::Lerp(1.f, 0.3f, ExtinguishAlpha);
+    // Spread
+    const float SuppressByWater = FMath::Lerp(1.f, 0.3f, ExtinguishAlpha);
+    const float SuppressByBackdraft = FMath::Lerp(1.f, 0.2f, 1.f - BackdraftScale01); // Ready면 더 줄이기
+    CurrentSpreadRadius = T.SpreadRadius * SuppressByWater * SuppressByBackdraft;
     SpreadInterval = FMath::Max(0.05f, T.SpreadInterval);
 
-    // 강도 역시 진압률에 따라 약화시켜 주변 가연물에 주는 압력을 줄임
-    float SuppressionMul = FMath::Lerp(1.f, 0.2f, ExtinguishAlpha);
-    EffectiveIntensity = BaseIntensity * (0.35f + 0.65f * FuelRatio01) * SuppressionMul;
+    // Effective intensity
+    const float FuelMul = (0.35f + 0.65f * FuelRatio01);
+    const float WaterMul = FMath::Lerp(1.f, 0.2f, ExtinguishAlpha);
+    const float BackdraftMul = FMath::Lerp(1.f, 0.05f, 1.f - BackdraftScale01); // Ready면 거의 최소
+
+    EffectiveIntensity = BaseIntensity * FuelMul * WaterMul * BackdraftMul;
     EffectiveIntensity = FMath::Max(0.f, EffectiveIntensity);
 }
 
 void AFireActor::ApplyToOwnerCombustible()
 {
-    if (!IsValid(LinkedCombustible) || !IsValid(LinkedRoom)) return;
+    if (!IsValid(LinkedCombustible) || !IsValid(LinkedRoom))
+        return;
 
-    // 연료 소비량: 정책 + 런타임 튜닝 기반
     float FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+
+    // Backdraft Ready 스케일
+    const float BackdraftMul = GetCombustionScaleFromRoom();
+    if (BackdraftMul <= KINDA_SMALL_NUMBER)
+        return;
 
     FFireRuntimeTuning T;
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    const float Consume = T.ConsumePerSecond * EffectiveIntensity * InfluenceInterval * LinkedCombustible->Fuel.FuelConsumeMul;
+    // 연료 소비 (BackdraftMul로 억제)
+    const float Consume =
+        T.ConsumePerSecond *
+        EffectiveIntensity *
+        InfluenceInterval *
+        LinkedCombustible->Fuel.FuelConsumeMul *
+        BackdraftMul;
+
     LinkedCombustible->ConsumeFuel(Consume);
 
-    // 타겟 자신도 더 타게(열) -> 재점화 같은 건 필요 없으면 제거 가능
-    LinkedCombustible->AddHeat(EffectiveIntensity * 0.5f);
+    // 열 축적도 Ready면 거의 멈춤
+    LinkedCombustible->AddHeat(EffectiveIntensity * 0.5f * BackdraftMul);
 }
 
 void AFireActor::SubmitInfluenceToRoom()
 {
-    if (!IsValid(LinkedRoom) || !IsValid(LinkedCombustible)) return;
+    if (!IsValid(LinkedRoom) || !IsValid(LinkedCombustible))
+        return;
 
     const float FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+    const float BackdraftMul = GetCombustionScaleFromRoom();
+    if (BackdraftMul <= KINDA_SMALL_NUMBER)
+        return;
 
     FFireRuntimeTuning T;
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    LinkedRoom->AccumulateInfluence(CombustibleType, EffectiveIntensity, T.InfluenceScale);
+    // 방 영향도 Ready면 급감
+    LinkedRoom->AccumulateInfluence(CombustibleType, EffectiveIntensity, T.InfluenceScale * BackdraftMul);
 }
 
 void AFireActor::SpreadPressureToNeighbors()
 {
-    if (!IsValid(LinkedRoom)) return;
+    if (!IsValid(LinkedRoom))
+        return;
+
+    // Backdraft Ready면 확산 압력 거의 차단
+    const float BackdraftMul = GetCombustionScaleFromRoom();
+    if (BackdraftMul <= 0.2f) // 완전 차단 기준은 취향
+        return;
 
     TArray<UCombustibleComponent*> List;
     LinkedRoom->GetCombustiblesInRoom(List, /*exclude burning*/true);
@@ -264,48 +272,34 @@ void AFireActor::SpreadPressureToNeighbors()
     const FVector Origin = GetSpreadOrigin();
     const float Radius = CurrentSpreadRadius;
 
-    UE_LOG(LogFire, Warning, TEXT("[Fire] SpreadStart Origin=%s Radius=%.1f Candidates=%d"),
-        *Origin.ToString(), Radius, List.Num());
-
     int32 Applied = 0;
 
     for (UCombustibleComponent* C : List)
     {
-        if (!IsValid(C) || C->IsBurning()) continue;
+        if (!IsValid(C) || C->IsBurning())
+            continue;
 
         const FVector P0 = GetOwnerCenterFromComb(C);
         const float Dist = FVector::Dist(P0, Origin);
-
         if (Dist > Radius)
-        {
-            UE_LOG(LogFire, VeryVerbose, TEXT("[Fire] SpreadSkip Dist>R Owner=%s Dist=%.1f"),
-                *GetNameSafe(C->GetOwner()), Dist);
             continue;
-        }
 
         float Pressure = ComputePressure(EffectiveIntensity, Dist, Radius);
 
-        if (CombustibleType == ECombustibleType::Oil) Pressure *= 1.10f;
+        if (CombustibleType == ECombustibleType::Oil)       Pressure *= 1.10f;
         if (CombustibleType == ECombustibleType::Explosive) Pressure *= 1.60f;
 
-        // ★ 임시로 KINDA_SMALL_NUMBER 체크를 완화해서 “정말 0인지”부터 확인
+        // Ready면 압력도 더 줄임
+        Pressure *= BackdraftMul;
+
         if (Pressure <= 0.f)
-        {
-            UE_LOG(LogFire, VeryVerbose, TEXT("[Fire] SpreadSkip Pressure<=0 Owner=%s Dist=%.1f"),
-                *GetNameSafe(C->GetOwner()), Dist);
             continue;
-        }
 
-        // 이 줄은 2)에서 고칠 거지만 일단 로그 확인용으로 그대로 둬도 됨
         C->AddIgnitionPressure(FireID, Pressure);
-
-        UE_LOG(LogFire, Warning, TEXT("[Fire] SpreadHit Owner=%s Dist=%.1f Pressure=%.4f"),
-            *GetNameSafe(C->GetOwner()), Dist, Pressure);
-
         Applied++;
     }
 
-    UE_LOG(LogFire, Warning, TEXT("[Fire] SpreadEnd Applied=%d"), Applied);
+    UE_LOG(LogFire, VeryVerbose, TEXT("[Fire] SpreadEnd Applied=%d"), Applied);
 }
 
 FVector AFireActor::GetSpreadOrigin() const
@@ -321,7 +315,9 @@ FVector AFireActor::GetSpreadOrigin() const
 
 void AFireActor::Extinguish()
 {
-    if (!bIsActive) return;
+    if (!bIsActive)
+        return;
+
     bIsActive = false;
 
     if (IsValid(LinkedRoom))
@@ -333,39 +329,40 @@ void AFireActor::Extinguish()
         LinkedCombustible->ActiveFire = nullptr;
     }
 
-    // Strength01 파라미터를 통해 나이아가라 내부에서 조절
-
-    // 20초의 생명 주기
+    // VFX는 Strength01로 내려가며 사라지게 하고, 생명주기 부여
     SetLifeSpan(20.0f);
 }
 
 void AFireActor::UpdateVfx(float DeltaSeconds)
 {
-    if (!IsValid(FirePsc)) return;
+    if (!IsValid(FirePsc))
+        return;
 
     float TargetStrength01 = 0.f;
 
-    // A. 살아있는 상태일 때의 강도 계산
     if (bIsActive)
     {
         float Fuel01 = 1.f;
         if (IsValid(LinkedCombustible))
             Fuel01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
 
+        // Backdraft Ready면 VFX도 거의 꺼진 것처럼
+        const float BackdraftMul = GetCombustionScaleFromRoom();
+
         const float Int01 = FMath::Clamp(EffectiveIntensity / FMath::Max(0.01f, BaseIntensity), 0.f, 2.f);
         const float Raw01 = FMath::Clamp(0.65f * Fuel01 + 0.35f * (Int01 * 0.5f), 0.f, 1.f);
-        const float Ramp01 = (IgniteRampSeconds <= 0.f) ? 1.f : FMath::Clamp(SpawnAge / IgniteRampSeconds, 0.f, 1.f);
 
-        TargetStrength01 = Raw01 * Ramp01;
+        const float Ramp01 = (IgniteRampSeconds <= 0.f)
+            ? 1.f
+            : FMath::Clamp(SpawnAge / IgniteRampSeconds, 0.f, 1.f);
+
+        TargetStrength01 = Raw01 * Ramp01 * FMath::Lerp(0.15f, 1.0f, BackdraftMul);
     }
     else
     {
-        // B. 소멸 중일 때 (Extinguish 호출 이후)
-        // 이미 생성된 Strength01을 0으로 빠르게 깎습니다.
-        TargetStrength01 = 0.0f;
+        TargetStrength01 = 0.f;
     }
 
-    // 부드럽게 보간 
     Strength01 = FMath::FInterpTo(Strength01, TargetStrength01, DeltaSeconds, 1.0f);
     FirePsc->SetFloatParameter(TEXT("Strength01"), Strength01);
 }

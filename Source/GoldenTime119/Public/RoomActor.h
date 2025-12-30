@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "CombustibleType.h"
+#include "FireRuntimeTuning.h"
 #include "RoomActor.generated.h"
 
 class UBoxComponent;
@@ -40,21 +41,6 @@ struct FRoomEnvSnapshot
     UPROPERTY(BlueprintReadOnly) float Oxygen = 1.f;       // 0..1
     UPROPERTY(BlueprintReadOnly) float FireValue = 0.f;
     UPROPERTY(BlueprintReadOnly) ERoomState State = ERoomState::Idle;
-};
-
-USTRUCT(BlueprintType)
-struct FFireRuntimeTuning
-{
-    GENERATED_BODY()
-
-    UPROPERTY(BlueprintReadOnly) float FuelRatio01 = 1.f;
-    UPROPERTY(BlueprintReadOnly) float Intensity01 = 1.f;
-
-    UPROPERTY(BlueprintReadOnly) float SpreadRadius = 350.f;
-    UPROPERTY(BlueprintReadOnly) float SpreadInterval = 1.f;
-
-    UPROPERTY(BlueprintReadOnly) float ConsumePerSecond = 1.f;
-    UPROPERTY(BlueprintReadOnly) float InfluenceScale = 1.f;
 };
 
 USTRUCT(BlueprintType)
@@ -113,6 +99,8 @@ struct FBackdraftParams
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBackdraftEvent);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FBackdraftReadyChanged, bool, bReady);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FBackdraftLeakStrength, float, Strength01);
 
 UCLASS()
 class GOLDENTIME119_API ARoomActor : public AActor
@@ -147,6 +135,41 @@ public:
     // 스폰할 Fire 클래스
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Fire")
     TSubclassOf<AFireActor> FireClass;
+
+    // ===== Backdraft Ready (연출/연소 억제) =====
+    UPROPERTY(BlueprintAssignable, Category = "Room|Backdraft")
+    FBackdraftReadyChanged OnBackdraftReadyChanged;
+
+    UPROPERTY(BlueprintAssignable, Category = "Room|Backdraft")
+    FBackdraftLeakStrength OnBackdraftLeakStrength;
+
+    // 준비상태(Ready)일 때 연소 스케일: 요구사항 “연소 거의 최소”
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float BackdraftReadyCombustionScale = 0.05f;
+
+    // 누출 연출 강도 계산용(연기 임계)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float BackdraftLeakStartSmoke01 = 0.75f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float BackdraftLeakFullSmoke01 = 0.95f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft", meta = (ClampMin = "0.1", ClampMax = "8.0"))
+    float BackdraftLeakCurvePow = 3.0f;
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    bool IsBackdraftReady() const { return bBackdraftReady; }
+
+    // FireActor가 참조할 연소 스케일(Ready면 0.05)
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    float GetBackdraftCombustionScale01() const
+    {
+        return bBackdraftReady ? BackdraftReadyCombustionScale : 1.0f;
+    }
+
+    // BP에서 문틈 연기 VFX 강도(0..1)를 바로 쓰기 좋게
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    float ComputeBackdraftLeakStrength01() const;
 
     // 타입별 정책
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Policy") FFirePolicy PolicyNormal;
@@ -352,6 +375,12 @@ private:
 
     // Backdraft internal
     float LastBackdraftTime = -1000.f;
+
+    // Backdraft Ready internal
+    UPROPERTY(VisibleAnywhere, Category = "Room|Backdraft")
+    bool bBackdraftReady = false;
+
+    void UpdateBackdraftReadyAndLeak(float DeltaSeconds);
 
 private:
     const FFirePolicy& GetPolicy(ECombustibleType Type) const;
