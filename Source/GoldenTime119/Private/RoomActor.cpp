@@ -12,7 +12,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogFire, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogRoomActor, Log, All);
 
 static FORCEINLINE FVector GetActorCenter(AActor* A)
 {
@@ -113,7 +113,7 @@ void ARoomActor::BeginPlay()
     bBackdraftArmed = false;
     LastBackdraftTime = -1000.f;
 
-    UE_LOG(LogFire, Warning,
+    UE_LOG(LogRoomActor, Warning,
         TEXT("[Room] BeginPlay Room=%s Combustibles=%d Doors=%d FloorZ=%.1f CeilingZ=%.1f NPZ=%.1f"),
         *GetName(), Combustibles.Num(), Doors.Num(), FloorZ, CeilingZ, NP.NeutralPlaneZ);
 }
@@ -449,7 +449,7 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
 
     if (!IsValid(NewFire))
     {
-        UE_LOG(LogFire, Error, TEXT("[Room] SpawnFireForCombustible failed: SpawnActorDeferred"));
+        UE_LOG(LogRoomActor, Error, TEXT("[Room] SpawnFireForCombustible failed: SpawnActorDeferred"));
         return nullptr;
     }
 
@@ -466,7 +466,7 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
     NewFire->SetActorRelativeLocation(FVector::ZeroVector);
     NewFire->SetActorRelativeRotation(FRotator::ZeroRotator);
 
-    UE_LOG(LogFire, Warning, TEXT("[Room] FireSpawned Fire=%s Id=%s Target=%s Loc=%s"),
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] FireSpawned Fire=%s Id=%s Target=%s Loc=%s"),
         *GetNameSafe(NewFire),
         *NewFire->FireID.ToString(),
         *GetNameSafe(OwnerActor),
@@ -518,7 +518,7 @@ void ARoomActor::Debug_RescanCombustibles()
         }
     }
 
-    UE_LOG(LogFire, Warning, TEXT("[Room] Rescan Room=%s Added=%d Total=%d"), *GetName(), Added, Combustibles.Num());
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] Rescan Room=%s Added=%d Total=%d"), *GetName(), Added, Combustibles.Num());
 }
 
 // ============================ Env apply/reset/state ============================
@@ -559,7 +559,7 @@ void ARoomActor::UpdateRoomState()
 
     if (Prev != State)
     {
-        UE_LOG(LogFire, Warning, TEXT("[Room] StateChange Room=%s %d -> %d (Heat=%.1f Smoke=%.2f O2=%.2f Fires=%d)"),
+        UE_LOG(LogRoomActor, Warning, TEXT("[Room] StateChange Room=%s %d -> %d (Heat=%.1f Smoke=%.2f O2=%.2f Fires=%d)"),
             *GetName(), (int32)Prev, (int32)State, Heat, Smoke, Oxygen, FireCount);
     }
 }
@@ -637,7 +637,7 @@ void ARoomActor::OnRoomBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor*
     if (Comb)
     {
         RegisterCombustible(Comb);
-        UE_LOG(LogFire, VeryVerbose, TEXT("[Room] Overlap+ Combustible=%s"), *GetNameSafe(OtherActor));
+        UE_LOG(LogRoomActor, VeryVerbose, TEXT("[Room] Overlap+ Combustible=%s"), *GetNameSafe(OtherActor));
     }
 }
 
@@ -650,7 +650,7 @@ void ARoomActor::OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* O
     if (Comb)
     {
         UnregisterCombustible(Comb);
-        UE_LOG(LogFire, VeryVerbose, TEXT("[Room] Overlap- Combustible=%s"), *GetNameSafe(OtherActor));
+        UE_LOG(LogRoomActor, VeryVerbose, TEXT("[Room] Overlap- Combustible=%s"), *GetNameSafe(OtherActor));
     }
 }
 
@@ -728,14 +728,14 @@ void ARoomActor::EnsureSmokeVolumesSpawned()
             OutMesh = OutActor->FindComponentByClass<UStaticMeshComponent>();
             if (!IsValid(OutMesh))
             {
-                UE_LOG(LogFire, Error, TEXT("[Room] SmokeVolume(%s) has NO StaticMeshComponent. BP_Smoke에 StaticMeshComponent를 추가하세요."), Tag);
+                UE_LOG(LogRoomActor, Error, TEXT("[Room] SmokeVolume(%s) has NO StaticMeshComponent. BP_Smoke에 StaticMeshComponent를 추가하세요."), Tag);
                 return;
             }
 
             OutMID = OutMesh->CreateDynamicMaterialInstance(0);
             if (!IsValid(OutMID))
             {
-                UE_LOG(LogFire, Error, TEXT("[Room] CreateDynamicMaterialInstance failed. Tag=%s Room=%s"), Tag, *GetName());
+                UE_LOG(LogRoomActor, Error, TEXT("[Room] CreateDynamicMaterialInstance failed. Tag=%s Room=%s"), Tag, *GetName());
                 return;
             }
         };
@@ -959,11 +959,11 @@ void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
         AFireActor* Reignite = IgniteRandomCombustibleInRoom(/*bAllowElectric=*/true);
         if (IsValid(Reignite))
         {
-            UE_LOG(LogFire, Warning, TEXT("[Room] Backdraft reignited: %s"), *GetNameSafe(Reignite));
+            UE_LOG(LogRoomActor, Warning, TEXT("[Room] Backdraft reignited: %s"), *GetNameSafe(Reignite));
         }
     }
 
-    UE_LOG(LogFire, Warning, TEXT("[Room] BACKDRAFT! Room=%s Smoke=%.2f Upper=%.2f Lower=%.2f O2=%.2f FireValue=%.1f Heat=%.1f Vent=%.2f"),
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] BACKDRAFT! Room=%s Smoke=%.2f Upper=%.2f Lower=%.2f O2=%.2f FireValue=%.1f Heat=%.1f Vent=%.2f"),
         *GetName(), Smoke, NP.UpperSmoke01, LowerSmoke01, Oxygen, FireValue, Heat, NP.Vent01);
 }
 

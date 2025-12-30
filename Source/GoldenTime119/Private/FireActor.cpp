@@ -8,7 +8,7 @@
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/World.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogFire, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogFireActor, Log, All);
 
 static FORCEINLINE FVector GetOwnerCenterFromComb(const UCombustibleComponent* Comb)
 {
@@ -48,7 +48,7 @@ void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
 
     EffectiveIntensity = BaseIntensity;
 
-    UE_LOG(LogFire, Warning, TEXT("[Fire] InitFire Fire=%s Id=%s Room=%s Type=%d BaseInt=%.2f Loc=%s"),
+    UE_LOG(LogFireActor, Warning, TEXT("[Fire] InitFire Fire=%s Id=%s Room=%s Type=%d BaseInt=%.2f Loc=%s"),
         *GetName(), *FireID.ToString(),
         *GetNameSafe(LinkedRoom),
         (int32)CombustibleType,
@@ -70,13 +70,13 @@ void AFireActor::BeginPlay()
 
     if (!bInitialized)
     {
-        UE_LOG(LogFire, Warning, TEXT("[Fire] BeginPlay: not initialized -> InitFire(SpawnRoom, SpawnType)"));
+        UE_LOG(LogFireActor, Warning, TEXT("[Fire] BeginPlay: not initialized -> InitFire(SpawnRoom, SpawnType)"));
         InitFire(SpawnRoom, SpawnType);
     }
 
     if (!IsValid(LinkedRoom))
     {
-        UE_LOG(LogFire, Error, TEXT("[Fire] BeginPlay: LinkedRoom is None -> Destroy"));
+        UE_LOG(LogFireActor, Error, TEXT("[Fire] BeginPlay: LinkedRoom is None -> Destroy"));
         Destroy();
         return;
     }
@@ -94,7 +94,7 @@ void AFireActor::BeginPlay()
                 Found->ActiveFire = this;
                 Found->bIsBurning = true;
 
-                UE_LOG(LogFire, Warning, TEXT("[Fire] LinkedCombustible recovered Owner=%s"),
+                UE_LOG(LogFireActor, Warning, TEXT("[Fire] LinkedCombustible recovered Owner=%s"),
                     *GetNameSafe(TargetActor));
             }
         }
@@ -299,7 +299,7 @@ void AFireActor::SpreadPressureToNeighbors()
         Applied++;
     }
 
-    UE_LOG(LogFire, VeryVerbose, TEXT("[Fire] SpreadEnd Applied=%d"), Applied);
+    UE_LOG(LogFireActor, VeryVerbose, TEXT("[Fire] SpreadEnd Applied=%d"), Applied);
 }
 
 FVector AFireActor::GetSpreadOrigin() const

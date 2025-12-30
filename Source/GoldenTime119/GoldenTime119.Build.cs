@@ -8,7 +8,7 @@ public class GoldenTime119 : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "Niagara", "UMG" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "Niagara", "UMG", "HeadMountedDisplay", "EnhancedInput"  });
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "Slate","SlateCore" });
 
