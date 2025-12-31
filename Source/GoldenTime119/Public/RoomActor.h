@@ -418,4 +418,7 @@ private:
         const FHitResult& SweepResult);
     UFUNCTION() void OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
+
+    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
+    void IgniteAllCombustiblesInRoom(bool bAllowElectric = false);
 };

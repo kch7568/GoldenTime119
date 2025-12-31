@@ -978,3 +978,37 @@ void ARoomActor::ApplyOxygenCapBySmoke(float DeltaSeconds)
     // "상한"만 걸기 (산소를 억지로 올리진 않음)
     Oxygen = FMath::Min(Oxygen, O2Cap);
 }
+
+// RoomActor.cpp - 함수 구현
+void ARoomActor::IgniteAllCombustiblesInRoom(bool bAllowElectric)
+{
+    TArray<UCombustibleComponent*> List;
+    GetCombustiblesInRoom(List, true); // true = 이미 타고 있는 것 제외
+
+    int32 IgnitedCount = 0;
+
+    for (UCombustibleComponent* Comb : List)
+    {
+        if (!IsValid(Comb) || !IsValid(Comb->GetOwner()))
+            continue;
+
+        // 전기 타입 체크
+        if (Comb->CombustibleType == ECombustibleType::Electric)
+        {
+            if (!bAllowElectric)
+                continue;
+            if (!Comb->bElectricIgnitionTriggered)
+                continue;
+        }
+
+        AFireActor* Fire = IgniteActor(Comb->GetOwner());
+        if (IsValid(Fire))
+        {
+            IgnitedCount++;
+        }
+    }
+
+    UE_LOG(LogRoomActor, Warning,
+        TEXT("[Room] IgniteAll Room=%s IgnitedCount=%d TotalCombustibles=%d"),
+        *GetName(), IgnitedCount, List.Num());
+}
