@@ -1,5 +1,9 @@
 #include "TutorialSequenceActor.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/FileHelper.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Engine/DataTable.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
@@ -16,10 +20,20 @@ void ATutorialSequenceActor::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// DataTable에서 자동 로드
+	if (bAutoLoadFromDataTable && StepsDataTable)
+	{
+		LoadStepsFromDataTable(StepsDataTable);
+		LoadVoiceAssets();
+		DebugPrint(TEXT("[Tutorial] Auto-loaded from DataTable"));
+	}
+
 	if (bEnableDebugHotkeys)
 	{
 		BindDebugInput();
 	}
+
+	// WorldSubtitleAnchorActor 바인딩
 	AWorldSubtitleAnchorActor* Anchor = Cast<AWorldSubtitleAnchorActor>(
 		UGameplayStatics::GetActorOfClass(this, AWorldSubtitleAnchorActor::StaticClass())
 	);
@@ -33,14 +47,11 @@ void ATutorialSequenceActor::BeginPlay()
 	{
 		DebugPrint(TEXT("[Tutorial] WorldSubtitleAnchorActor NOT FOUND in level"));
 	}
-	/*AFollowSubtitleActor* Follow = Cast<AFollowSubtitleActor>(
-		UGameplayStatics::GetActorOfClass(this, AFollowSubtitleActor::StaticClass())
-	);
-	if (Follow)
-	{
-		OnSubtitle.AddDynamic(Follow, &ASubtitleBaseActor::HandleTutorialSubtitle);
-	}*/
 }
+
+// ============================================================================
+// 디버그
+// ============================================================================
 
 void ATutorialSequenceActor::BindDebugInput()
 {
@@ -48,13 +59,11 @@ void ATutorialSequenceActor::BindDebugInput()
 	if (!PC)
 		return;
 
-	// Actor가 입력을 받도록 활성화
 	EnableInput(PC);
 
 	if (!InputComponent)
 		return;
 
-	// F2: 다음 스텝 강제 진행
 	InputComponent->BindKey(EKeys::End, IE_Pressed, this, &ATutorialSequenceActor::DebugAdvanceStep);
 
 	DebugPrint(TEXT("[Tutorial] Debug hotkeys enabled: END = Advance Step"));
@@ -62,7 +71,6 @@ void ATutorialSequenceActor::BindDebugInput()
 
 void ATutorialSequenceActor::DebugAdvanceStep()
 {
-	// 튜토리얼이 아직 시작 전이면 시작부터
 	if (CurrentIndex == INDEX_NONE)
 	{
 		DebugPrint(TEXT("[Tutorial][END] StartTutorial()"));
@@ -70,18 +78,16 @@ void ATutorialSequenceActor::DebugAdvanceStep()
 		return;
 	}
 
-	// 이미 끝난 상태면 무시
 	if (!Steps.IsValidIndex(CurrentIndex))
 	{
-		DebugPrint(TEXT("[Tutorial][F2] No valid step. (Already finished?)"));
+		DebugPrint(TEXT("[Tutorial][END] No valid step. (Already finished?)"));
 		return;
 	}
 
 	const FName StepId = Steps[CurrentIndex].StepId;
-	DebugPrint(FString::Printf(TEXT("[Tutorial][F2] Force advance from Step %d (%s)"),
+	DebugPrint(FString::Printf(TEXT("[Tutorial][END] Force advance from Step %d (%s)"),
 		CurrentIndex, *StepId.ToString()));
 
-	// 타이머 무시하고 즉시 다음 Step로
 	ClearTimers();
 	bMinHoldSatisfied = true;
 	EnterStep(CurrentIndex + 1);
@@ -94,15 +100,14 @@ void ATutorialSequenceActor::DebugPrint(const FString& Msg) const
 
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(
-			-1,
-			2.0f,
-			FColor::Yellow,
-			Msg
-		);
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, Msg);
 	}
 	UE_LOG(LogTemp, Log, TEXT("%s"), *Msg);
 }
+
+// ============================================================================
+// 상태 조회
+// ============================================================================
 
 FName ATutorialSequenceActor::GetCurrentStepId() const
 {
@@ -112,6 +117,10 @@ FName ATutorialSequenceActor::GetCurrentStepId() const
 	}
 	return NAME_None;
 }
+
+// ============================================================================
+// 튜토리얼 제어
+// ============================================================================
 
 void ATutorialSequenceActor::StartTutorial()
 {
@@ -130,6 +139,7 @@ void ATutorialSequenceActor::SkipTutorial()
 	ClearTimers();
 	CurrentIndex = INDEX_NONE;
 	CurrentCount = 0;
+	CurrentSegmentIndex = 0;
 	bMinHoldSatisfied = true;
 
 	OnFinished.Broadcast(false);
@@ -141,10 +151,162 @@ void ATutorialSequenceActor::RestartTutorial()
 	ClearTimers();
 	CurrentIndex = INDEX_NONE;
 	CurrentCount = 0;
+	CurrentSegmentIndex = 0;
 	bMinHoldSatisfied = false;
 
 	DebugPrint(TEXT("[Tutorial] Restart"));
 	StartTutorial();
+}
+
+bool ATutorialSequenceActor::LoadStepsFromJSON(const FString& FilePath)
+{
+	FString JsonString;
+	if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
+	{
+		DebugPrint(FString::Printf(TEXT("[Tutorial] Failed to load JSON: %s"), *FilePath));
+		return false;
+	}
+
+	TSharedPtr<FJsonValue> JsonValue;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+
+	if (!FJsonSerializer::Deserialize(Reader, JsonValue) || !JsonValue.IsValid())
+	{
+		DebugPrint(TEXT("[Tutorial] Failed to parse JSON"));
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* StepsArray;
+	if (!JsonValue->TryGetArray(StepsArray))
+	{
+		DebugPrint(TEXT("[Tutorial] JSON root is not an array"));
+		return false;
+	}
+
+	Steps.Empty();
+
+	for (const TSharedPtr<FJsonValue>& StepValue : *StepsArray)
+	{
+		const TSharedPtr<FJsonObject>* StepObject;
+		if (!StepValue->TryGetObject(StepObject))
+			continue;
+
+		FTutorialStep Step;
+
+		// 기본 정보
+		FString StepIdStr;
+		if ((*StepObject)->TryGetStringField(TEXT("StepId"), StepIdStr))
+			Step.StepId = FName(*StepIdStr);
+
+		(*StepObject)->TryGetStringField(TEXT("VoiceFile"), Step.VoiceFile);
+		(*StepObject)->TryGetNumberField(TEXT("TotalDuration"), Step.TotalDuration);
+		(*StepObject)->TryGetNumberField(TEXT("MinHoldSeconds"), Step.MinHoldSeconds);
+		(*StepObject)->TryGetNumberField(TEXT("MaxWaitSeconds"), Step.MaxWaitSeconds);
+		(*StepObject)->TryGetBoolField(TEXT("bAutoComplete"), Step.bAutoComplete);
+		(*StepObject)->TryGetNumberField(TEXT("RequiredCount"), Step.RequiredCount);
+
+		FString StepEventTagStr;
+		if ((*StepObject)->TryGetStringField(TEXT("StepEventTag"), StepEventTagStr) && !StepEventTagStr.IsEmpty())
+			Step.StepEventTag = FName(*StepEventTagStr);
+
+		FString RequiredActionStr;
+		if ((*StepObject)->TryGetStringField(TEXT("RequiredAction"), RequiredActionStr))
+		{
+			// 문자열을 ETutorialAction으로 변환
+			if (RequiredActionStr == TEXT("Move")) Step.RequiredAction = ETutorialAction::Move;
+			else if (RequiredActionStr == TEXT("Turn")) Step.RequiredAction = ETutorialAction::Turn;
+			else if (RequiredActionStr == TEXT("Grab")) Step.RequiredAction = ETutorialAction::Grab;
+			else if (RequiredActionStr == TEXT("UseHoseFog")) Step.RequiredAction = ETutorialAction::UseHoseFog;
+			else if (RequiredActionStr == TEXT("UseAxe")) Step.RequiredAction = ETutorialAction::UseAxe;
+			else if (RequiredActionStr == TEXT("TurnValve")) Step.RequiredAction = ETutorialAction::TurnValve;
+			// 필요한 다른 액션들 추가...
+			else Step.RequiredAction = ETutorialAction::None;
+		}
+
+		FString RequiredTargetTagStr;
+		if ((*StepObject)->TryGetStringField(TEXT("RequiredTargetTag"), RequiredTargetTagStr) && !RequiredTargetTagStr.IsEmpty())
+			Step.RequiredTargetTag = FName(*RequiredTargetTagStr);
+
+		// AudioSegments 파싱
+		const TArray<TSharedPtr<FJsonValue>>* SegmentsArray;
+		if ((*StepObject)->TryGetArrayField(TEXT("AudioSegments"), SegmentsArray))
+		{
+			for (const TSharedPtr<FJsonValue>& SegValue : *SegmentsArray)
+			{
+				const TSharedPtr<FJsonObject>* SegObject;
+				if (!SegValue->TryGetObject(SegObject))
+					continue;
+
+				FSubtitleSegment Segment;
+				(*SegObject)->TryGetNumberField(TEXT("StartTime"), Segment.StartTime);
+				(*SegObject)->TryGetNumberField(TEXT("EndTime"), Segment.EndTime);
+
+				FString SubtitleStr;
+				if ((*SegObject)->TryGetStringField(TEXT("SubtitleText"), SubtitleStr))
+					Segment.SubtitleText = FText::FromString(SubtitleStr);
+
+				FString EventTagStr;
+				if ((*SegObject)->TryGetStringField(TEXT("EventTag"), EventTagStr) && !EventTagStr.IsEmpty())
+					Segment.EventTag = FName(*EventTagStr);
+
+				Step.AudioSegments.Add(Segment);
+			}
+		}
+
+		Steps.Add(Step);
+	}
+
+	DebugPrint(FString::Printf(TEXT("[Tutorial] Loaded %d steps from JSON"), Steps.Num()));
+	return true;
+}
+
+bool ATutorialSequenceActor::LoadStepsFromDataTable(UDataTable* DataTable)
+{
+	if (!DataTable)
+	{
+		DebugPrint(TEXT("[Tutorial] DataTable is null"));
+		return false;
+	}
+
+	Steps.Empty();
+
+	TArray<FTutorialStep*> AllRows;
+	DataTable->GetAllRows<FTutorialStep>(TEXT("LoadStepsFromDataTable"), AllRows);
+
+	for (FTutorialStep* Row : AllRows)
+	{
+		if (Row)
+		{
+			Steps.Add(*Row);
+		}
+	}
+
+	DebugPrint(FString::Printf(TEXT("[Tutorial] Loaded %d steps from DataTable"), Steps.Num()));
+	return true;
+}
+
+void ATutorialSequenceActor::LoadVoiceAssets()
+{
+	for (FTutorialStep& Step : Steps)
+	{
+		if (Step.Voice != nullptr || Step.VoiceFile.IsEmpty())
+			continue;
+
+		// 확장자 제거하고 에셋 경로 생성
+		FString AssetName = FPaths::GetBaseFilename(Step.VoiceFile);
+		FString FullPath = AudioFolderPath + AssetName + TEXT(".") + AssetName;
+
+		USoundBase* LoadedSound = LoadObject<USoundBase>(nullptr, *FullPath);
+		if (LoadedSound)
+		{
+			Step.Voice = LoadedSound;
+			DebugPrint(FString::Printf(TEXT("[Tutorial] Loaded voice: %s"), *AssetName));
+		}
+		else
+		{
+			DebugPrint(FString::Printf(TEXT("[Tutorial] Failed to load voice: %s"), *FullPath));
+		}
+	}
 }
 
 void ATutorialSequenceActor::ReportAction(ETutorialAction Action, FName TargetTag)
@@ -161,6 +323,10 @@ void ATutorialSequenceActor::ReportAction(ETutorialAction Action, FName TargetTa
 		return;
 
 	CurrentCount++;
+
+	DebugPrint(FString::Printf(TEXT("[Tutorial] Action reported: %d/%d"),
+		CurrentCount, Step.RequiredCount));
+
 	CompleteStepIfReady();
 }
 
@@ -178,6 +344,10 @@ bool ATutorialSequenceActor::DoesActionMatchStep(const FTutorialStep& Step, ETut
 	return true;
 }
 
+// ============================================================================
+// 스텝 진행
+// ============================================================================
+
 void ATutorialSequenceActor::EnterStep(int32 NewIndex)
 {
 	ClearTimers();
@@ -192,16 +362,25 @@ void ATutorialSequenceActor::EnterStep(int32 NewIndex)
 
 	CurrentIndex = NewIndex;
 	CurrentCount = 0;
+	CurrentSegmentIndex = 0;
 	bMinHoldSatisfied = false;
 
 	const FTutorialStep& Step = Steps[CurrentIndex];
 
+	// 스텝 변경 이벤트
 	OnStepChanged.Broadcast(Step.StepId, CurrentIndex);
-	StartSubtitlePages(Step);
 
-	DebugPrint(FString::Printf(TEXT("[Tutorial] Enter Step %d (%s)"),
-		CurrentIndex, *Step.StepId.ToString()));
+	// ★ 스텝 레벨 이벤트 태그 트리거
+	if (Step.StepEventTag != NAME_None)
+	{
+		OnEventTriggered.Broadcast(Step.StepEventTag);
+		DebugPrint(FString::Printf(TEXT("[Tutorial] Step Event: %s"), *Step.StepEventTag.ToString()));
+	}
 
+	DebugPrint(FString::Printf(TEXT("[Tutorial] Enter Step %d (%s) - Subtitles: %d"),
+		CurrentIndex, *Step.StepId.ToString(), Step.GetSubtitleCount()));
+
+	// 음성 재생
 	if (Step.Voice)
 	{
 		if (bUse2DAudio)
@@ -214,7 +393,10 @@ void ATutorialSequenceActor::EnterStep(int32 NewIndex)
 		}
 	}
 
-	// Min hold
+	// 자막 시작
+	StartSubtitles(Step);
+
+	// MinHold 타이머
 	if (Step.MinHoldSeconds <= 0.f)
 	{
 		bMinHoldSatisfied = true;
@@ -226,6 +408,7 @@ void ATutorialSequenceActor::EnterStep(int32 NewIndex)
 			FTimerDelegate::CreateLambda([this]()
 				{
 					bMinHoldSatisfied = true;
+					DebugPrint(TEXT("[Tutorial] MinHold satisfied"));
 					CompleteStepIfReady();
 				}),
 			Step.MinHoldSeconds,
@@ -233,7 +416,7 @@ void ATutorialSequenceActor::EnterStep(int32 NewIndex)
 		);
 	}
 
-	// Auto / MaxWait
+	// 자동 완료 또는 MaxWait 타이머
 	if (Step.bAutoComplete)
 	{
 		CompleteStepIfReady();
@@ -280,7 +463,7 @@ void ATutorialSequenceActor::ForceCompleteStep()
 	if (!Steps.IsValidIndex(CurrentIndex))
 		return;
 
-	DebugPrint(FString::Printf(TEXT("[Tutorial] MaxWait timeout -> advance from %d"), CurrentIndex));
+	DebugPrint(FString::Printf(TEXT("[Tutorial] MaxWait timeout -> advance from Step %d"), CurrentIndex));
 	EnterStep(CurrentIndex + 1);
 }
 
@@ -288,63 +471,170 @@ void ATutorialSequenceActor::ClearTimers()
 {
 	GetWorldTimerManager().ClearTimer(MinHoldTimer);
 	GetWorldTimerManager().ClearTimer(MaxWaitTimer);
+	StopSubtitles();
 }
 
-void ATutorialSequenceActor::StopSubtitlePages()
-{
-	GetWorldTimerManager().ClearTimer(SubtitlePageTimer);
-	CurrentPageIndex = 0;
-}
+// ============================================================================
+// 자막 시스템
+// ============================================================================
 
-void ATutorialSequenceActor::BroadcastCurrentSubtitlePage(const FTutorialStep& Step)
+void ATutorialSequenceActor::StartSubtitles(const FTutorialStep& Step)
 {
-	// 페이지가 있으면 페이지 우선, 없으면 단일 Subtitle 사용
-	if (Step.SubtitlePages.Num() > 0)
+	StopSubtitles();
+
+	if (Step.UsesAudioSegments())
 	{
-		const int32 SafeIdx = FMath::Clamp(CurrentPageIndex, 0, Step.SubtitlePages.Num() - 1);
-		OnSubtitle.Broadcast(Step.SubtitlePages[SafeIdx], Step.MinHoldSeconds);
+		// [모드 1] 음성 타이밍 기반 세그먼트
+		StartAudioSegmentSubtitles(Step);
+		DebugPrint(FString::Printf(TEXT("[Tutorial] Using AudioSegments mode (%d segments)"),
+			Step.AudioSegments.Num()));
+	}
+	else if (Step.UsesSubtitlePages())
+	{
+		// [모드 2] 고정 간격 페이지
+		StartPagedSubtitles(Step);
+		DebugPrint(FString::Printf(TEXT("[Tutorial] Using SubtitlePages mode (%d pages, %.1fs interval)"),
+			Step.SubtitlePages.Num(), Step.SubtitlePageInterval));
 	}
 	else
 	{
-		OnSubtitle.Broadcast(Step.Subtitle, Step.MinHoldSeconds);
+		// [모드 3] 단일 자막
+		ShowSingleSubtitle(Step);
+		DebugPrint(TEXT("[Tutorial] Using single subtitle mode"));
 	}
 }
 
-void ATutorialSequenceActor::StartSubtitlePages(const FTutorialStep& Step)
+void ATutorialSequenceActor::StopSubtitles()
 {
-	StopSubtitlePages();
+	// 페이지 모드 타이머
+	GetWorldTimerManager().ClearTimer(SubtitlePageTimer);
 
-	// 첫 페이지 송출
-	CurrentPageIndex = 0;
-	BroadcastCurrentSubtitlePage(Step);
+	// 세그먼트 모드 타이머들
+	for (FTimerHandle& Handle : SegmentTimerHandles)
+	{
+		GetWorldTimerManager().ClearTimer(Handle);
+	}
+	SegmentTimerHandles.Empty();
 
-	// 페이지가 2개 이상이면 자동 넘김
+	CurrentSegmentIndex = 0;
+}
+
+void ATutorialSequenceActor::StartAudioSegmentSubtitles(const FTutorialStep& Step)
+{
+	if (Step.AudioSegments.Num() == 0)
+		return;
+
+	const FName CurrentStepId = Step.StepId;
+
+	// 각 세그먼트마다 해당 시간에 자막을 표시하는 타이머 설정
+	for (int32 i = 0; i < Step.AudioSegments.Num(); i++)
+	{
+		const FSubtitleSegment& Segment = Step.AudioSegments[i];
+
+		FTimerHandle TimerHandle;
+
+		// 캡처할 데이터
+		const int32 SegmentIndex = i;
+		const FText SubtitleText = Segment.SubtitleText;
+		const float Duration = Segment.GetDuration();
+		const FName EventTag = Segment.EventTag;  // ★ 이벤트 태그도 캡처
+
+		if (Segment.StartTime <= 0.f)
+		{
+			// 즉시 표시 (첫 번째 세그먼트가 0초에 시작하는 경우)
+			BroadcastSegment(SegmentIndex, SubtitleText, Duration, EventTag);
+		}
+		else
+		{
+			// StartTime 후에 표시
+			GetWorldTimerManager().SetTimer(
+				TimerHandle,
+				FTimerDelegate::CreateLambda([this, CurrentStepId, SegmentIndex, SubtitleText, Duration, EventTag]()
+					{
+						// 스텝이 바뀌었으면 무시
+						if (GetCurrentStepId() != CurrentStepId)
+							return;
+
+						BroadcastSegment(SegmentIndex, SubtitleText, Duration, EventTag);
+					}),
+				Segment.StartTime,
+				false
+			);
+
+			SegmentTimerHandles.Add(TimerHandle);
+		}
+	}
+}
+
+void ATutorialSequenceActor::StartPagedSubtitles(const FTutorialStep& Step)
+{
+	if (Step.SubtitlePages.Num() == 0)
+		return;
+
+	const FName CurrentStepId = Step.StepId;
+
+	// 첫 페이지 즉시 표시
+	CurrentSegmentIndex = 0;
+	BroadcastSegment(0, Step.SubtitlePages[0], Step.SubtitlePageInterval);
+
+	// 2개 이상일 때 자동 전환
 	if (Step.SubtitlePages.Num() >= 2 && Step.SubtitlePageInterval > 0.f)
 	{
 		GetWorldTimerManager().SetTimer(
 			SubtitlePageTimer,
-			FTimerDelegate::CreateLambda([this, Step]()
+			FTimerDelegate::CreateLambda([this, CurrentStepId, Step]()
 				{
-					// Step가 바뀌었으면 중단
-					if (!Steps.IsValidIndex(CurrentIndex) || Steps[CurrentIndex].StepId != Step.StepId)
+					// 스텝이 바뀌었으면 중단
+					if (GetCurrentStepId() != CurrentStepId)
 					{
-						StopSubtitlePages();
+						StopSubtitles();
 						return;
 					}
 
-					CurrentPageIndex++;
-					if (CurrentPageIndex >= Step.SubtitlePages.Num())
+					CurrentSegmentIndex++;
+
+					if (CurrentSegmentIndex >= Step.SubtitlePages.Num())
 					{
-						// 마지막 페이지 도달 후 더 이상 넘기지 않음
-						StopSubtitlePages();
+						StopSubtitles();
 						return;
 					}
 
-					BroadcastCurrentSubtitlePage(Step);
+					BroadcastSegment(CurrentSegmentIndex, Step.SubtitlePages[CurrentSegmentIndex], Step.SubtitlePageInterval);
 				}),
 			Step.SubtitlePageInterval,
-			true
+			true // 반복
 		);
 	}
 }
 
+void ATutorialSequenceActor::ShowSingleSubtitle(const FTutorialStep& Step)
+{
+	if (Step.Subtitle.IsEmpty())
+		return;
+
+	// MinHoldSeconds를 표시 시간으로 사용, 없으면 기본 5초
+	float Duration = Step.MinHoldSeconds > 0.f ? Step.MinHoldSeconds : 5.0f;
+
+	BroadcastSegment(0, Step.Subtitle, Duration);
+}
+
+void ATutorialSequenceActor::BroadcastSegment(int32 SegmentIndex, const FText& Text, float Duration, FName EventTag)
+{
+	CurrentSegmentIndex = SegmentIndex;
+
+	// 메인 자막 이벤트
+	OnSubtitle.Broadcast(Text, Duration);
+
+	// 세그먼트 변경 이벤트 (선택적 사용)
+	OnSegmentChanged.Broadcast(SegmentIndex, Text, Duration);
+
+	// ★ 이벤트 태그가 있으면 브로드캐스트
+	if (EventTag != NAME_None)
+	{
+		OnEventTriggered.Broadcast(EventTag);
+		DebugPrint(FString::Printf(TEXT("[Tutorial] Event Triggered: %s"), *EventTag.ToString()));
+	}
+
+	DebugPrint(FString::Printf(TEXT("[Tutorial] Subtitle[%d]: %s (%.1fs)"),
+		SegmentIndex, *Text.ToString(), Duration));
+}
