@@ -110,6 +110,9 @@ class GOLDENTIME119_API ARoomActor : public AActor
 public:
     ARoomActor();
 
+    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
+    float GetNearestFireDistance(const FVector& WorldPos) const;
+
     // ===== Env (±ÇÀ§°ª) =====
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float Heat = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Room|Env") float Oxygen = 1.f;

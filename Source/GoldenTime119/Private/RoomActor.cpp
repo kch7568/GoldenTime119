@@ -1012,3 +1012,19 @@ void ARoomActor::IgniteAllCombustiblesInRoom(bool bAllowElectric)
         TEXT("[Room] IgniteAll Room=%s IgnitedCount=%d TotalCombustibles=%d"),
         *GetName(), IgnitedCount, List.Num());
 }
+
+float ARoomActor::GetNearestFireDistance(const FVector& WorldPos) const
+{
+    float Best = TNumericLimits<float>::Max();
+
+    for (const auto& Kvp : ActiveFires)
+    {
+        const AFireActor* Fire = Kvp.Value.Get();
+        if (!IsValid(Fire)) continue;
+
+        const float D = FVector::Dist(WorldPos, Fire->GetActorLocation());
+        Best = FMath::Min(Best, D);
+    }
+
+    return Best;
+}
