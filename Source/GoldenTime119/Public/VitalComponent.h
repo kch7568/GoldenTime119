@@ -3,8 +3,9 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "RoomActor.h"
 #include "VitalComponent.generated.h"
+
+class ARoomActor;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnVitals01Changed, float, Hp01, float, Temp01, float, O201);
 
@@ -16,12 +17,15 @@ class GOLDENTIME119_API UVitalComponent : public UActorComponent
 public:
     UVitalComponent();
 
+    // ===== Events =====
     UPROPERTY(BlueprintAssignable, Category = "Vitals")
     FOnVitals01Changed OnVitals01Changed;
 
+    // ===== External binding =====
     UFUNCTION(BlueprintCallable, Category = "Vitals")
     void SetCurrentRoom(ARoomActor* InRoom);
 
+    // ===== Getters =====
     UFUNCTION(BlueprintCallable, Category = "Vitals")
     float GetHp01() const { return Hp01; }
 
@@ -31,17 +35,57 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Vitals")
     float GetO201() const { return O201; }
 
+    // =====================================================================
+    // Debug Override + Hotkeys
+    //  - Details에서 Debug* 슬라이더로 바꿔도 됨(단, 자동 이벤트는 엔진이 안 쏴줌)
+    //  - 그래서 "핫키"로 강제 증감 지원:
+    //    1/2/3 : HP/TEMP/O2 천천히 내리기
+    //    7/8/9 : HP/TEMP/O2 천천히 올리기
+    // =====================================================================
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug")
+    bool bDebugOverrideVitals = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DebugHp01 = 1.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DebugTemp01 = 0.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DebugO201 = 1.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug")
+    bool bEnableDebugHotkeys = true;
+
+    // 초당 변화량 (0.15면 1초 누르면 0.15 변화)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitals|Debug", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float DebugStepPerSecond = 0.15f;
+
+    UFUNCTION(BlueprintCallable, Category = "Vitals|Debug")
+    void DebugSetVitals01(float InHp01, float InTemp01, float InO201, bool bForceBroadcast = true);
+
+    UFUNCTION(BlueprintCallable, Category = "Vitals|Debug")
+    void DebugApplyOverride(bool bForceBroadcast = true);
+
+    UFUNCTION(BlueprintCallable, Category = "Vitals|Debug")
+    void DebugClearOverride(bool bForceBroadcast = true);
+
 protected:
     virtual void BeginPlay() override;
-
-    // 이 시그니처가 헤더에 반드시 있어야 합니다.
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
     void StepVitals(float Dt);
     void BroadcastIfChanged(bool bForce);
 
+    // Debug (Details 값 적용)
+    void ApplyDebugToLive(bool bForceBroadcast);
+
+    // Debug (핫키 처리)
+    bool ProcessDebugHotkeys(float Dt);
+
 private:
+    // ===== Room context =====
     UPROPERTY()
     TObjectPtr<ARoomActor> CurrentRoom = nullptr;
 
@@ -62,7 +106,6 @@ private:
     // ===== Update cadence =====
     UPROPERTY(EditAnywhere, Category = "Vitals|Update")
     float UpdateInterval = 0.05f; // 20Hz
-
     float Acc = 0.f;
 
     // ===== Env->Vital tuning =====
