@@ -1,18 +1,29 @@
 // ============================ DoorActor.cpp ============================
 #include "DoorActor.h"
 #include "RoomActor.h"
+#include "BreakableComponent.h"
 
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/ParticleSystem.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogDoorActor, Log, All);
+
 ADoorActor::ADoorActor()
 {
     PrimaryActorTick.bCanEverTick = true;
+
+    // BreakableComponent 생성
+    Breakable = CreateDefaultSubobject<UBreakableComponent>(TEXT("Breakable"));
+    Breakable->MaxHP = 80.f;
+    Breakable->Material = EBreakableMaterial::Wood;
+    Breakable->RequiredTool = EBreakToolType::Axe;
+    Breakable->bAllowPassthroughWhenBroken = false; // DoorActor가 직접 처리
 }
 
 void ADoorActor::BeginPlay()
@@ -23,12 +34,15 @@ void ADoorActor::BeginPlay()
     if (!IsValid(RoomA) && IsValid(OwningRoom))
         RoomA = OwningRoom;
 
-    // LinkType 보정: RoomB가 없으면 Outside로
     if (LinkType == EDoorLinkType::RoomToRoom && !IsValid(RoomB))
         LinkType = EDoorLinkType::RoomToOutside;
 
     // Hinge 캐시
     CacheHingeComponent();
+    CacheDoorMeshComponent();
+
+    // Breakable 설정
+    SetupBreakableComponent();
 
     // 초기 상태
     ApplyStateByOpenAmount();
@@ -45,11 +59,9 @@ void ADoorActor::BeginPlay()
     EnsureDoorVfx();
     BindRoomSignals(true);
 
-    // 초기 상태가 Open/Breached면 sealed 리셋 힌트
     if (DoorState != EDoorState::Closed)
         NotifyRoomsDoorOpenedOrBreached();
 
-    // 초기 VFX 0
     if (SmokeLeakPSC)
         SmokeLeakPSC->SetFloatParameter(LeakParamName, 0.f);
     if (BackdraftPSC)
@@ -66,21 +78,18 @@ void ADoorActor::Tick(float DeltaSeconds)
         APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
         if (PC)
         {
-            // 2 누르면 "열기 시작"
             if (PC->WasInputKeyJustPressed(EKeys::Two))
             {
                 bDebugOpening = true;
                 bDebugClosing = false;
             }
 
-            // 1 누르면 "닫기 시작"
             if (PC->WasInputKeyJustPressed(EKeys::One))
             {
                 bDebugClosing = true;
                 bDebugOpening = false;
             }
 
-            // 3 누르면 토글
             if (PC->WasInputKeyJustPressed(EKeys::Three))
             {
                 const bool bShouldOpen = (OpenAmount01 < 0.5f);
@@ -115,12 +124,150 @@ void ADoorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
+// ============================ Breakable ============================
+void ADoorActor::SetupBreakableComponent()
+{
+    if (!bIsBreakable || !Breakable)
+        return;
+
+    // 이벤트 바인딩
+    Breakable->OnBroken.AddDynamic(this, &ADoorActor::OnDoorBrokenByAxe);
+    Breakable->OnDamageReceived.AddDynamic(this, &ADoorActor::OnDoorDamagedByAxe);
+
+    UE_LOG(LogDoorActor, Log, TEXT("[Door] %s Breakable setup - HP:%.1f Material:%d"),
+        *GetName(), Breakable->MaxHP, (int32)Breakable->Material);
+}
+
+void ADoorActor::OnDoorDamagedByAxe(float Damage, float RemainingHP)
+{
+    UE_LOG(LogDoorActor, Warning, TEXT("[Door] %s HIT by axe! Damage:%.1f HP:%.1f/%.1f"),
+        *GetName(), Damage, RemainingHP, Breakable ? Breakable->MaxHP : 0.f);
+}
+
+void ADoorActor::OnDoorBrokenByAxe()
+{
+    UE_LOG(LogDoorActor, Error, TEXT("[Door] ====== %s BROKEN BY AXE ======"), *GetName());
+
+    // 문짝 숨기기
+    if (bHideDoorMeshOnBreak && CachedDoorMesh)
+    {
+        CachedDoorMesh->SetVisibility(false);
+        CachedDoorMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    }
+
+    // 잔해 스폰
+    SpawnDebris();
+
+    // Breached 상태로 전환 (백드래프트 트리거 포함)
+    SetBreached();
+}
+
+void ADoorActor::SpawnDebris()
+{
+    if (DebrisMeshes.Num() == 0)
+    {
+        UE_LOG(LogDoorActor, Log, TEXT("[Door] No debris meshes assigned"));
+        return;
+    }
+
+    const FVector DoorLocation = CachedDoorMesh ? CachedDoorMesh->GetComponentLocation() : GetActorLocation();
+
+    for (int32 i = 0; i < DebrisCount; i++)
+    {
+        UStaticMesh* DebrisMesh = DebrisMeshes[FMath::RandRange(0, DebrisMeshes.Num() - 1)];
+        if (!DebrisMesh)
+            continue;
+
+        const FVector SpawnOffset = FVector(
+            FMath::RandRange(-20.f, 20.f),
+            FMath::RandRange(-40.f, 40.f),
+            FMath::RandRange(0.f, 150.f)
+        );
+        const FVector SpawnLocation = DoorLocation + SpawnOffset;
+
+        const FRotator SpawnRotation = FRotator(
+            FMath::RandRange(-180.f, 180.f),
+            FMath::RandRange(-180.f, 180.f),
+            FMath::RandRange(-180.f, 180.f)
+        );
+
+        UStaticMeshComponent* DebrisComp = NewObject<UStaticMeshComponent>(this);
+        if (DebrisComp)
+        {
+            DebrisComp->SetStaticMesh(DebrisMesh);
+            DebrisComp->SetWorldLocation(SpawnLocation);
+            DebrisComp->SetWorldRotation(SpawnRotation);
+            DebrisComp->SetSimulatePhysics(true);
+            DebrisComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+            DebrisComp->RegisterComponent();
+
+            const FVector ImpulseDir = FVector(
+                FMath::RandRange(-1.f, 1.f),
+                FMath::RandRange(-1.f, 1.f),
+                FMath::RandRange(0.5f, 1.f)
+            ).GetSafeNormal();
+            DebrisComp->AddImpulse(ImpulseDir * DebrisImpulseStrength, NAME_None, true);
+        }
+    }
+
+    UE_LOG(LogDoorActor, Log, TEXT("[Door] Spawned %d debris pieces"), DebrisCount);
+}
+
+bool ADoorActor::IsBreakableDoor() const
+{
+    return bIsBreakable && Breakable != nullptr;
+}
+
+float ADoorActor::GetBreakableHPRatio() const
+{
+    if (!Breakable)
+        return 1.f;
+
+    return Breakable->GetHPRatio();
+}
+
+void ADoorActor::CacheDoorMeshComponent()
+{
+    CachedDoorMesh = nullptr;
+
+    if (DoorMeshComponentName != NAME_None)
+    {
+        TArray<UActorComponent*> Comps;
+        GetComponents(UStaticMeshComponent::StaticClass(), Comps);
+        for (UActorComponent* C : Comps)
+        {
+            if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(C))
+            {
+                if (SMC->GetFName() == DoorMeshComponentName)
+                {
+                    CachedDoorMesh = SMC;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 못 찾으면 Hinge 아래 첫 번째 StaticMesh
+    if (!CachedDoorMesh && CachedHinge)
+    {
+        TArray<USceneComponent*> ChildComps;
+        CachedHinge->GetChildrenComponents(false, ChildComps);
+        for (USceneComponent* Child : ChildComps)
+        {
+            if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Child))
+            {
+                CachedDoorMesh = SMC;
+                break;
+            }
+        }
+    }
+}
+
 // ============================ Visual ============================
 void ADoorActor::CacheHingeComponent()
 {
     CachedHinge = nullptr;
 
-    // 1) 이름으로 찾기 (BP: "Hinge")
     if (HingeComponentName != NAME_None)
     {
         TArray<UActorComponent*> Comps;
@@ -138,21 +285,18 @@ void ADoorActor::CacheHingeComponent()
         }
     }
 
-    // 2) 못 찾으면 Root (최후수단)
-    if (!IsValid(CachedHinge))
+    if (!CachedHinge)
         CachedHinge = GetRootComponent();
 }
 
 void ADoorActor::ApplyDoorVisual(float DeltaSeconds)
 {
-    if (!IsValid(CachedHinge))
+    if (!CachedHinge)
         CacheHingeComponent();
-    if (!IsValid(CachedHinge))
+    if (!CachedHinge)
         return;
 
     const float O = FMath::Clamp(OpenAmount01, 0.f, 1.f);
-
-    // 방향/최대각 적용
     const float Sign = (OpenDirection == EDoorOpenDirection::PositiveYaw) ? 1.f : -1.f;
     const float TargetYaw = ClosedYawOffsetDeg + (Sign * MaxOpenYawDeg * O);
 
@@ -161,7 +305,6 @@ void ADoorActor::ApplyDoorVisual(float DeltaSeconds)
     else
         VisualYawCurrent = TargetYaw;
 
-    // 로컬 Yaw만 회전 (힌지 기준)
     FRotator R = CachedHinge->GetRelativeRotation();
     R.Yaw = VisualYawCurrent;
     CachedHinge->SetRelativeRotation(R);
@@ -245,11 +388,9 @@ void ADoorActor::SetOpenAmount01(float InOpen01)
     if (Prev != DoorState)
         OnDoorStateChanged.Broadcast(DoorState);
 
-    // 열림이면 sealed 리셋 힌트
     if (DoorState != EDoorState::Closed)
         NotifyRoomsDoorOpenedOrBreached();
 
-    // 닫힘→열림 에지에서만 백드래프트 트라이
     const bool bEdgeClosedToOpen = (Prev == EDoorState::Closed && DoorState != EDoorState::Closed);
     if (bEdgeClosedToOpen)
         TryTriggerBackdraftIfNeeded(false);
@@ -298,10 +439,6 @@ void ADoorActor::NotifyRoomsDoorOpenedOrBreached()
     if (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB)) RoomB->NotifyDoorSealed(false);
 }
 
-// ============================ Backdraft trigger rule ============================
-// 요구사항:
-// - 양쪽 방 모두 armed면 backdraft X
-// - 한쪽 armed면 그쪽만 trigger 가능 (다만 반대쪽도 armed면 무시)
 void ADoorActor::TryTriggerBackdraftIfNeeded(bool bFromBreach)
 {
     const float VentBoost = bFromBreach ? 1.f : ComputeVent01();
@@ -309,11 +446,9 @@ void ADoorActor::TryTriggerBackdraftIfNeeded(bool bFromBreach)
     const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
     const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB)) ? RoomB->IsBackdraftArmed() : false;
 
-    // 양쪽 armed면 어떤 것도 트리거하지 않음
     if (bAArmed && bBArmed)
         return;
 
-    // RoomToOutside: RoomA만 대상으로 취급
     if (LinkType == EDoorLinkType::RoomToOutside)
     {
         if (bAArmed && IsValid(RoomA))
@@ -321,7 +456,6 @@ void ADoorActor::TryTriggerBackdraftIfNeeded(bool bFromBreach)
         return;
     }
 
-    // RoomToRoom
     if (bAArmed && IsValid(RoomA))
         RoomA->TriggerBackdraft(GetActorTransform(), VentBoost);
 
@@ -353,7 +487,6 @@ void ADoorActor::EnsureDoorVfx()
 
 void ADoorActor::BindRoomSignals(bool bBind)
 {
-    // RoomA
     if (IsValid(RoomA))
     {
         if (bBind)
@@ -371,7 +504,6 @@ void ADoorActor::BindRoomSignals(bool bBind)
         }
     }
 
-    // RoomB (RoomToRoom)
     if (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB))
     {
         if (bBind)
@@ -403,21 +535,18 @@ void ADoorActor::OnRoomBBackdraftLeakStrength(float Leak01)
 void ADoorActor::SetLeakSideToRoomA()
 {
     if (!SmokeLeakPSC) return;
-    // Door 로컬 Right(-) 방향을 RoomA 쪽이라고 가정하는 기본 정책
     SmokeLeakPSC->SetRelativeLocation(FVector(0.f, -LeakSideOffsetCm, 0.f));
 }
 
 void ADoorActor::SetLeakSideToRoomB()
 {
     if (!SmokeLeakPSC) return;
-    // Door 로컬 Right(+) 방향을 RoomB 쪽이라고 가정하는 기본 정책
     SmokeLeakPSC->SetRelativeLocation(FVector(0.f, +LeakSideOffsetCm, 0.f));
 }
 
 void ADoorActor::SetLeakSideToOutsideFromRoomA()
 {
     if (!SmokeLeakPSC) return;
-    // RoomToOutside에서는 “바깥쪽”을 +Right로 둡니다(필요 시 반대로 바꿔서 씬에 맞추세요)
     SmokeLeakPSC->SetRelativeLocation(FVector(0.f, +LeakSideOffsetCm, 0.f));
 }
 
@@ -426,13 +555,11 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
     EnsureDoorVfx();
     if (!SmokeLeakPSC) return;
 
-    // Leak는 “문이 닫혀 있을 때”만 의미 있게
     const bool bClosed = (DoorState == EDoorState::Closed);
 
     const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
     const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB)) ? RoomB->IsBackdraftArmed() : false;
 
-    // ===== Rule 1: 양쪽 Armed면 leak 없음 =====
     if ((LinkType == EDoorLinkType::RoomToRoom) && bAArmed && bBArmed)
     {
         LeakValSmoothed = FMath::FInterpTo(LeakValSmoothed, 0.f, DeltaSeconds, LeakInterpSpeed);
@@ -441,7 +568,6 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
         return;
     }
 
-    // ===== Rule 2: Armed vs Normal이면 Normal 방향으로 leak =====
     float TargetLeak = 0.f;
     bool bShouldLeak = false;
 
@@ -449,7 +575,6 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
     {
         if (LinkType == EDoorLinkType::RoomToOutside)
         {
-            // RoomA armed면 바깥(=normal) 방향으로 leak
             if (bAArmed)
             {
                 bShouldLeak = true;
@@ -457,16 +582,14 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
                 SetLeakSideToOutsideFromRoomA();
             }
         }
-        else // RoomToRoom
+        else
         {
-            // A armed, B normal -> leak toward B
             if (bAArmed && !bBArmed)
             {
                 bShouldLeak = true;
                 TargetLeak = LeakFromRoomA01;
                 SetLeakSideToRoomB();
             }
-            // B armed, A normal -> leak toward A
             else if (bBArmed && !bAArmed)
             {
                 bShouldLeak = true;
@@ -476,7 +599,6 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
         }
     }
 
-    // Activate/Deactivate
     if (bShouldLeak && TargetLeak > 0.001f)
         SmokeLeakPSC->ActivateSystem(true);
 
@@ -487,32 +609,25 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
         SmokeLeakPSC->DeactivateSystem();
 }
 
-// Backdraft 발생 시: 문 확 열기 + Backdraft VFX Scale 세팅
 void ADoorActor::OnRoomBackdraftTriggered()
 {
     EnsureDoorVfx();
 
-    // 요구사항: “양쪽 arm인 경우 backdraft도 X”
     const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
     const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB)) ? RoomB->IsBackdraftArmed() : false;
 
     if ((LinkType == EDoorLinkType::RoomToRoom) && bAArmed && bBArmed)
         return;
 
-    // Backdraft VFX
     if (BackdraftPSC)
     {
         BackdraftPSC->ActivateSystem(true);
-
-        // Scale = 현재 VentBoost에 준하는 값으로
         const float Scale = (DoorState == EDoorState::Breached) ? 1.0f : FMath::Clamp(ComputeVent01(), 0.f, 1.f);
         BackdraftPSC->SetFloatParameter(BackdraftScaleParamName, Scale);
     }
 
-    // 문 확 열기
     if (bForceOpenOnBackdraft && DoorState != EDoorState::Breached)
     {
-        // 즉시 완전 개방(상태/이벤트/힌지 모두 연동)
         SetOpenAmount01(1.0f);
     }
 }

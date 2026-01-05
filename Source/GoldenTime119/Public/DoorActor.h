@@ -9,6 +9,7 @@ class ARoomActor;
 class USceneComponent;
 class UParticleSystem;
 class UParticleSystemComponent;
+class UBreakableComponent;
 
 UENUM(BlueprintType)
 enum class EDoorState : uint8
@@ -44,7 +45,6 @@ public:
     ADoorActor();
 
     // ===== Rooms =====
-    // Legacy: 과거 코드에서 OwningRoom을 쓰던 경우를 RoomA로 매핑
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Link")
     TObjectPtr<ARoomActor> OwningRoom = nullptr;
 
@@ -75,7 +75,7 @@ public:
     float VentMax = 1.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Leak", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float LeakMax = 0.08f; // 완전 밀폐라도 아주 미세 누설(원하면 0)
+    float LeakMax = 0.08f;
 
     // ===== Door visual(hinge) =====
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Visual")
@@ -99,6 +99,34 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Debug")
     float DebugOpenSpeed = 0.35f;
+
+    // ===== Breakable (도끼로 파괴) =====
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door|Breakable")
+    TObjectPtr<UBreakableComponent> Breakable = nullptr;
+
+    // 파괴 가능 여부
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+    bool bIsBreakable = true;
+
+    // 파괴 시 잔해 메시
+    UPROPERTY(EditAnywhere, Category = "Door|Breakable")
+    TArray<TObjectPtr<UStaticMesh>> DebrisMeshes;
+
+    // 잔해 개수
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+    int32 DebrisCount = 5;
+
+    // 잔해 튕김 강도
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+    float DebrisImpulseStrength = 500.f;
+
+    // 파괴 시 문짝 숨김 여부
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+    bool bHideDoorMeshOnBreak = true;
+
+    // 문짝 메시 컴포넌트 이름 (파괴 시 숨길 대상)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+    FName DoorMeshComponentName = TEXT("DoorMesh");
 
     // ===== Events =====
     UPROPERTY(BlueprintAssignable, Category = "Door|Event")
@@ -129,6 +157,13 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Door|State")
     void SetBreached();
 
+    // ===== Breakable API =====
+    UFUNCTION(BlueprintCallable, Category = "Door|Breakable")
+    bool IsBreakableDoor() const;
+
+    UFUNCTION(BlueprintCallable, Category = "Door|Breakable")
+    float GetBreakableHPRatio() const;
+
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
@@ -137,6 +172,7 @@ protected:
 private:
     // hinge cache
     UPROPERTY() TObjectPtr<USceneComponent> CachedHinge = nullptr;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> CachedDoorMesh = nullptr;
     float VisualYawCurrent = 0.f;
 
     // debug opening flags
@@ -148,6 +184,7 @@ private:
 
 private:
     void CacheHingeComponent();
+    void CacheDoorMeshComponent();
     void ApplyDoorVisual(float DeltaSeconds);
     void ApplyStateByOpenAmount();
 
@@ -155,6 +192,17 @@ private:
     void SyncRoomRegistration(bool bRegister);
     void NotifyRoomsDoorOpenedOrBreached();
     void TryTriggerBackdraftIfNeeded(bool bFromBreach);
+
+    // ===== Breakable =====
+    void SetupBreakableComponent();
+
+    UFUNCTION()
+    void OnDoorBrokenByAxe();
+
+    UFUNCTION()
+    void OnDoorDamagedByAxe(float Damage, float RemainingHP);
+
+    void SpawnDebris();
 
     // ===== Door VFX =====
 private:
@@ -171,28 +219,22 @@ private:
     TObjectPtr<UParticleSystemComponent> BackdraftPSC = nullptr;
 
     UPROPERTY(EditAnywhere, Category = "Door|VFX")
-    FName LeakParamName = TEXT("LeakVal");     // 단일 파라미터
+    FName LeakParamName = TEXT("LeakVal");
 
     UPROPERTY(EditAnywhere, Category = "Door|VFX")
-    FName BackdraftScaleParamName = TEXT("Scale"); // 단일 파라미터
+    FName BackdraftScaleParamName = TEXT("Scale");
 
-    // Leak 방향 오프셋(문 기준 로컬 Right 방향)
     UPROPERTY(EditAnywhere, Category = "Door|VFX", meta = (ClampMin = "0.0", ClampMax = "100.0"))
     float LeakSideOffsetCm = 25.f;
 
-    // Leak 값 스무딩
     UPROPERTY(EditAnywhere, Category = "Door|VFX", meta = (ClampMin = "0.0", ClampMax = "30.0"))
     float LeakInterpSpeed = 10.f;
 
-    // Backdraft 시 문 확 열림
     UPROPERTY(EditAnywhere, Category = "Door|Backdraft")
     bool bForceOpenOnBackdraft = true;
 
-    // 내부 상태(방별)
     float LeakFromRoomA01 = 0.f;
     float LeakFromRoomB01 = 0.f;
-
-    // 최종 출력
     float LeakValSmoothed = 0.f;
 
 private:
@@ -202,9 +244,8 @@ private:
     void UpdateDoorVfx(float DeltaSeconds);
     void SetLeakSideToRoomA();
     void SetLeakSideToRoomB();
-    void SetLeakSideToOutsideFromRoomA(); // RoomToOutside에서 RoomA 기준 바깥쪽
+    void SetLeakSideToOutsideFromRoomA();
 
-    // Room 이벤트 수신
     UFUNCTION()
     void OnRoomABackdraftLeakStrength(float Leak01);
 
@@ -212,5 +253,5 @@ private:
     void OnRoomBBackdraftLeakStrength(float Leak01);
 
     UFUNCTION()
-    void OnRoomBackdraftTriggered(); // 어느 방이든 Trigger되면 호출되게 바인딩(둘 다 같은 핸들러로 가능)
+    void OnRoomBackdraftTriggered();
 };
