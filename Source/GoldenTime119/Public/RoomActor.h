@@ -110,6 +110,9 @@ class GOLDENTIME119_API ARoomActor : public AActor
 public:
     ARoomActor();
 
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Room")
+    int32 GetActiveFireCount() const { return ActiveFires.Num(); }
+
     UFUNCTION(BlueprintCallable, Category = "Room|Fire")
     float GetNearestFireDistance(const FVector& WorldPos) const;
 
