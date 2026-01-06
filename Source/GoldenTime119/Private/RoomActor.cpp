@@ -18,7 +18,10 @@ static FORCEINLINE FVector GetActorCenter(AActor* A)
 {
     return IsValid(A) ? A->GetComponentsBoundingBox(true).GetCenter() : FVector::ZeroVector;
 }
-
+int32 ARoomActor::GetActiveFireCount() const
+{
+    return ActiveFires.Num();
+}
 // 여러 Vent(0..1)를 “확률 합성”으로 결합: 1 - Π(1 - Vi)
 static float CombineVents_Prob(const TArray<float>& Vents)
 {
@@ -149,6 +152,9 @@ void ARoomActor::Tick(float DeltaSeconds)
     if (bEnableBackdraft)
         EvaluateBackdraftArming(DeltaSeconds);
 
+    // 환기 구멍으로 인한 압력 감소
+    UpdateBackdraftPressure(DeltaSeconds);
+
     UpdateBackdraftReadyAndLeak(DeltaSeconds);
 
     // 8) Smoke Volumes
@@ -164,6 +170,8 @@ void ARoomActor::Tick(float DeltaSeconds)
 
     // 10) 누적치 초기화
     ResetAccumulators();
+
+
 }
 
 // ============================ Policy / Influence ============================
@@ -831,17 +839,40 @@ void ARoomActor::PushSmokeMaterialParams()
 // ============================ Backdraft ============================
 bool ARoomActor::CanArmBackdraft() const
 {
-    if (!bEnableBackdraft) return false;
-
-    if (Backdraft.bDisallowWhenRoomOnFire && State == ERoomState::Fire)
+    if (!bEnableBackdraft)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Disabled"));
         return false;
+    }
+    if (Backdraft.bDisallowWhenRoomOnFire && State == ERoomState::Fire)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Room on fire"));
+        return false;
+    }
+    if (Smoke < Backdraft.SmokeMin)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Smoke %.2f < Min %.2f"), Smoke, Backdraft.SmokeMin);
+        return false;
+    }
+    /* 불이 꺼져도 백드래프트는 나오게 수정함
+    if (FireValue < Backdraft.FireValueMin)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - FireValue %.1f < Min %.1f"), FireValue, Backdraft.FireValueMin);
+        return false;
+    }
+    */
+    if (Oxygen > Backdraft.O2Max)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Oxygen %.2f > Max %.2f"), Oxygen, Backdraft.O2Max);
+        return false;
+    }
+    if (Heat < Backdraft.HeatMin)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Heat %.1f < Min %.1f"), Heat, Backdraft.HeatMin);
+        return false;
+    }
 
-    // Smoke는 최종 합성값(Upper+Lower)로 판정
-    if (Smoke < Backdraft.SmokeMin) return false;
-    if (FireValue < Backdraft.FireValueMin) return false;
-    if (Oxygen > Backdraft.O2Max) return false;
-    if (Heat < Backdraft.HeatMin) return false;
-
+    UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] SUCCESS - All conditions met!"));
     return true;
 }
 
@@ -860,12 +891,22 @@ void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
 
     const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
 
+    // 매 틱 상태 로그
+    UE_LOG(LogRoomActor, Log, TEXT("[Backdraft] Check - Sealed:%d Vent:%.3f Armed:%d SealedTime:%.1f"),
+        bSealedNow, NP.Vent01, bBackdraftArmed, SealedTime);
+
     if (bSealedNow && CanArmBackdraft())
         SealedTime += DeltaSeconds;
     else
         SealedTime = 0.f;
 
+    const bool bWasArmed = bBackdraftArmed;
     bBackdraftArmed = (SealedTime >= Backdraft.ArmedHoldSeconds);
+
+    if (bBackdraftArmed && !bWasArmed)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] ===== ARMED! ====="));
+    }
 }
 
 float ARoomActor::ComputeBackdraftLeakStrength01() const
@@ -935,27 +976,53 @@ void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
     bBackdraftArmed = false;
     SealedTime = 0.f;
 
+    /*
     if (bBackdraftReady)
     {
         bBackdraftReady = false;
         OnBackdraftReadyChanged.Broadcast(false);
         OnBackdraftLeakStrength.Broadcast(0.f);
     }
+    */
 
-    const float Boost = FMath::Clamp(VentBoost01, 0.f, 1.f) * Backdraft.VentBoostOnTrigger;
+    // 환기 구멍으로 압력이 빠졌으면 백드래프트 강도 감소
+    const float PressureMultiplier = FMath::Clamp(BackdraftPressure, 0.1f, 1.f);
+
+    // 압력이 안전 수준 이하면 백드래프트 발생 안 함
+    if (BackdraftPressure <= BackdraftSafeThreshold && TotalDoorVentRate > 0.f)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Room] %s Backdraft PREVENTED by VentHoles! Pressure:%.2f"),
+            *GetName(), BackdraftPressure);
+
+        // 압력/환기 상태 초기화
+        BackdraftPressure = 0.f;
+        TotalDoorVentRate = 0.f;
+        VentingDoors.Empty();
+        return;
+    }
+
+    // Boost에 압력 배율 적용
+    const float Boost = FMath::Clamp(VentBoost01 * PressureMultiplier, 0.f, 1.f) * Backdraft.VentBoostOnTrigger;
     NP.Vent01 = FMath::Clamp(NP.Vent01 + Boost, 0.f, 1.f);
 
-    FireValue += Backdraft.FireValueBoost;
+    // FireValue 부스트도 압력에 비례
+    FireValue += Backdraft.FireValueBoost * PressureMultiplier;
 
-    // 연기 일부 급격 감소(상층 중심)
-    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - Backdraft.SmokeDropOnTrigger, 0.f, 1.f);
-    LowerSmoke01 = FMath::Clamp(LowerSmoke01 - Backdraft.SmokeDropOnTrigger * 0.25f, 0.f, 1.f);
+    // 연기 일부 급격 감소(상층 중심) - 압력에 비례
+    const float SmokeDropAmount = Backdraft.SmokeDropOnTrigger * PressureMultiplier;
+    NP.UpperSmoke01 = FMath::Clamp(NP.UpperSmoke01 - SmokeDropAmount, 0.f, 1.f);
+    LowerSmoke01 = FMath::Clamp(LowerSmoke01 - SmokeDropAmount * 0.25f, 0.f, 1.f);
+
+    // 압력/환기 상태 초기화
+    BackdraftPressure = 0.f;
+    TotalDoorVentRate = 0.f;
+    VentingDoors.Empty();
 
     OnBackdraft.Broadcast();
 
-    if (bIgniteOnBackdraft)
+    // 점화도 압력에 비례 (압력 낮으면 점화 확률 감소)
+    if (bIgniteOnBackdraft && FMath::FRand() < PressureMultiplier)
     {
-        // 전기 포함 여부는 원하는대로
         AFireActor* Reignite = IgniteRandomCombustibleInRoom(/*bAllowElectric=*/true);
         if (IsValid(Reignite))
         {
@@ -963,8 +1030,8 @@ void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
         }
     }
 
-    UE_LOG(LogRoomActor, Warning, TEXT("[Room] BACKDRAFT! Room=%s Smoke=%.2f Upper=%.2f Lower=%.2f O2=%.2f FireValue=%.1f Heat=%.1f Vent=%.2f"),
-        *GetName(), Smoke, NP.UpperSmoke01, LowerSmoke01, Oxygen, FireValue, Heat, NP.Vent01);
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] ======BACKDRAFT! Room=%s PressureMul=%.2f Smoke=%.2f Upper=%.2f Lower=%.2f O2=%.2f FireValue=%.1f Heat=%.1f Vent=%.2f"),
+        *GetName(), PressureMultiplier, Smoke, NP.UpperSmoke01, LowerSmoke01, Oxygen, FireValue, Heat, NP.Vent01);
 }
 
 // Tick()에서 RebuildSmokeFromNP() 이후, UpdateRoomState() 이전 정도에 넣기 추천
@@ -1027,4 +1094,68 @@ float ARoomActor::GetNearestFireDistance(const FVector& WorldPos) const
     }
 
     return Best;
+}
+void ARoomActor::AddDoorVentHole(ADoorActor* Door, float VentRate)
+{
+    if (!IsValid(Door))
+        return;
+
+    // 기존 값이 있으면 갱신, 없으면 추가
+    VentingDoors.Add(Door, VentRate);
+
+    // 총 환기율 재계산
+    TotalDoorVentRate = 0.f;
+    for (const auto& Kvp : VentingDoors)
+    {
+        if (Kvp.Key.IsValid())
+        {
+            TotalDoorVentRate += Kvp.Value;
+        }
+    }
+
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] %s VentHole added from Door %s - TotalVentRate:%.2f"),
+        *GetName(), *Door->GetName(), TotalDoorVentRate);
+}
+
+void ARoomActor::UpdateBackdraftPressure(float DeltaSeconds)
+{
+    // Armed 상태가 아니면 압력 0으로 유지
+    if (!bBackdraftArmed)
+    {
+        BackdraftPressure = 0.f;
+        return;
+    }
+
+    // Armed 상태에서 압력 축적
+    BackdraftPressure += BackdraftPressureBuildRate * DeltaSeconds;
+
+    // 환기 구멍으로 압력 감소
+    if (TotalDoorVentRate > 0.f)
+    {
+        const float Release = TotalDoorVentRate * VentHolePressureReleaseMultiplier * DeltaSeconds;
+        BackdraftPressure -= Release;
+
+        UE_LOG(LogRoomActor, Verbose, TEXT("[Room] %s Pressure releasing: %.3f (Rate:%.2f)"),
+            *GetName(), Release, TotalDoorVentRate);
+    }
+
+    BackdraftPressure = FMath::Clamp(BackdraftPressure, 0.f, 1.f);
+
+    // 압력이 안전 수준 이하로 떨어지면 Armed 해제!
+    if (BackdraftPressure <= BackdraftSafeThreshold && TotalDoorVentRate > 0.f)
+    {
+        bBackdraftArmed = false;
+        SealedTime = 0.f;
+
+        UE_LOG(LogRoomActor, Warning, TEXT("[Room] %s Backdraft DISARMED by VentHoles! Pressure:%.2f"),
+            *GetName(), BackdraftPressure);
+
+        // Ready 상태도 해제
+        if (bBackdraftReady)
+        {
+            bBackdraftReady = false;
+            OnBackdraftReadyChanged.Broadcast(false);
+            OnBackdraftLeakStrength.Broadcast(0.f);
+        }
+    }
 }

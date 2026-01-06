@@ -84,9 +84,9 @@ struct FBackdraftParams
     GENERATED_BODY()
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float SmokeMin = 0.35f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float FireValueMin = 8.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float O2Max = 0.18f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float HeatMin = 40.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float FireValueMin = 3.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float O2Max = 0.22f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float HeatMin = 30.f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float ArmedHoldSeconds = 3.0f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float CooldownSeconds = 8.0f;
@@ -95,7 +95,7 @@ struct FBackdraftParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float FireValueBoost = 10.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") float SmokeDropOnTrigger = 0.15f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") bool bDisallowWhenRoomOnFire = true;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdraft") bool bDisallowWhenRoomOnFire = false;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBackdraftEvent);
@@ -329,6 +329,10 @@ public:
 
     bool CanSustainFire() const { return Oxygen > MinOxygenToSustain; }
 
+    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
+    void IgniteAllCombustiblesInRoom(bool bAllowElectric = false);
+    UFUNCTION(BlueprintPure, Category = "Room|Fire")
+    int32 GetActiveFireCount() const;
     UFUNCTION(BlueprintCallable, Category = "Room|Env")
     FRoomEnvSnapshot GetEnvSnapshot() const;
 
@@ -422,6 +426,50 @@ private:
     UFUNCTION() void OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
-    void IgniteAllCombustiblesInRoom(bool bAllowElectric = false);
+    
+
+public:
+    // ===== 백드래프트 압력 (환기 구멍 시스템) =====
+
+// 백드래프트 압력 (0~1, Armed 상태에서 축적, 환기 구멍으로 감소)
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Room|Backdraft")
+    float BackdraftPressure = 0.f;
+
+    // 압력이 이 값 이하로 떨어지면 백드래프트 Armed 해제
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft")
+    float BackdraftSafeThreshold = 0.2f;
+
+    // 압력 축적 속도 (Armed 상태에서 초당)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft")
+    float BackdraftPressureBuildRate = 0.1f;
+
+    // 환기 구멍을 통한 압력 감소 속도 배율
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room|Backdraft")
+    float VentHolePressureReleaseMultiplier = 1.0f;
+
+    // 현재 환기 중인 문들의 총 환기율
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Room|Backdraft")
+    float TotalDoorVentRate = 0.f;
+
+    // ===== 환기 구멍 API =====
+
+    // 문에서 환기 구멍이 생겼을 때 호출
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    void AddDoorVentHole(ADoorActor* Door, float VentRate);
+
+    // 현재 백드래프트 압력 반환
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    float GetBackdraftPressure() const { return BackdraftPressure; }
+
+    // 백드래프트가 안전한 상태인지
+    UFUNCTION(BlueprintCallable, Category = "Room|Backdraft")
+    bool IsBackdraftSafe() const { return BackdraftPressure <= BackdraftSafeThreshold; }
+
+private:
+    // 환기 중인 문 목록
+    UPROPERTY()
+    TMap<TWeakObjectPtr<ADoorActor>, float> VentingDoors;
+
+    // 환기 구멍으로 인한 압력 감소 처리
+    void UpdateBackdraftPressure(float DeltaSeconds);
 };

@@ -10,6 +10,7 @@ class USceneComponent;
 class UParticleSystem;
 class UParticleSystemComponent;
 class UBreakableComponent;
+class UDecalComponent;
 
 UENUM(BlueprintType)
 enum class EDoorState : uint8
@@ -33,8 +34,32 @@ enum class EDoorOpenDirection : uint8
     NegativeYaw UMETA(DisplayName = "NegativeYaw"),
 };
 
+// 환기 구멍 정보
+USTRUCT(BlueprintType)
+struct FVentHoleInfo
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    FVector LocalPosition = FVector::ZeroVector;
+
+    UPROPERTY(BlueprintReadOnly)
+    float CreatedTime = 0.f;
+
+    UPROPERTY(BlueprintReadOnly)
+    TObjectPtr<UDecalComponent> CrackDecal = nullptr;
+
+    UPROPERTY(BlueprintReadOnly)
+    TObjectPtr<UParticleSystemComponent> VentSmokePSC = nullptr;
+
+    // 이 구멍에서 연기가 나오고 있는지
+    UPROPERTY(BlueprintReadOnly)
+    bool bIsVenting = false;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDoorStateChanged, EDoorState, NewState);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDoorOpenAmountChanged, float, OpenAmount01);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnVentHoleCreated, int32, TotalHoleCount);
 
 UCLASS()
 class GOLDENTIME119_API ADoorActor : public AActor
@@ -104,29 +129,57 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door|Breakable")
     TObjectPtr<UBreakableComponent> Breakable = nullptr;
 
-    // 파괴 가능 여부
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
     bool bIsBreakable = true;
 
-    // 파괴 시 잔해 메시
     UPROPERTY(EditAnywhere, Category = "Door|Breakable")
     TArray<TObjectPtr<UStaticMesh>> DebrisMeshes;
 
-    // 잔해 개수
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
     int32 DebrisCount = 5;
 
-    // 잔해 튕김 강도
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
     float DebrisImpulseStrength = 500.f;
 
-    // 파괴 시 문짝 숨김 여부
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
     bool bHideDoorMeshOnBreak = true;
 
-    // 문짝 메시 컴포넌트 이름 (파괴 시 숨길 대상)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
     FName DoorMeshComponentName = TEXT("DoorMesh");
+
+    // ===== 환기 구멍 시스템 =====
+
+    // 환기 구멍 생성 HP 임계값 (이 비율 이하로 내려가면 구멍 생성)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|VentHole")
+    float VentHoleCreateThreshold = 0.7f;
+
+    // 환기 구멍 최대 개수
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|VentHole")
+    int32 MaxVentHoles = 3;
+
+    // 구멍당 백드래프트 압력 감소 속도 (초당)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|VentHole")
+    float VentRatePerHole = 0.15f;
+
+    // 환기 구멍에서 연기가 나오는 최소 BackdraftPressure
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|VentHole")
+    float MinPressureForVentSmoke = 0.1f;
+
+    // 현재 환기 구멍들
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Door|VentHole")
+    TArray<FVentHoleInfo> VentHoles;
+
+    // 환기 구멍용 균열 데칼 머티리얼
+    UPROPERTY(EditAnywhere, Category = "Door|VentHole|VFX")
+    TObjectPtr<UMaterialInterface> CrackDecalMaterial;
+
+    // 환기 구멍용 연기 VFX
+    UPROPERTY(EditAnywhere, Category = "Door|VentHole|VFX")
+    TObjectPtr<UParticleSystem> VentSmokeTemplate;
+
+    // 균열 데칼 크기
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|VentHole|VFX")
+    FVector CrackDecalSize = FVector(30.f, 15.f, 15.f);
 
     // ===== Events =====
     UPROPERTY(BlueprintAssignable, Category = "Door|Event")
@@ -134,6 +187,9 @@ public:
 
     UPROPERTY(BlueprintAssignable, Category = "Door|Event")
     FDoorOpenAmountChanged OnDoorOpenAmountChanged;
+
+    UPROPERTY(BlueprintAssignable, Category = "Door|VentHole")
+    FOnVentHoleCreated OnVentHoleCreated;
 
     // ===== API =====
     UFUNCTION(BlueprintCallable, Category = "Door|Vent")
@@ -164,6 +220,16 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Door|Breakable")
     float GetBreakableHPRatio() const;
 
+    // ===== VentHole API =====
+    UFUNCTION(BlueprintCallable, Category = "Door|VentHole")
+    int32 GetVentHoleCount() const { return VentHoles.Num(); }
+
+    UFUNCTION(BlueprintCallable, Category = "Door|VentHole")
+    float GetTotalVentRate() const { return VentHoles.Num() * VentRatePerHole; }
+
+    UFUNCTION(BlueprintCallable, Category = "Door|VentHole")
+    bool HasVentHoles() const { return VentHoles.Num() > 0; }
+
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
@@ -181,6 +247,10 @@ private:
 
     // edge tracking
     EDoorState PrevStateForEdge = EDoorState::Closed;
+
+    // VentHole tracking
+    float LastHPRatioForVentHole = 1.f;
+    FVector LastDamageLocation = FVector::ZeroVector;
 
 private:
     void CacheHingeComponent();
@@ -203,6 +273,13 @@ private:
     void OnDoorDamagedByAxe(float Damage, float RemainingHP);
 
     void SpawnDebris();
+
+    // ===== VentHole =====
+    void CheckAndCreateVentHole(float CurrentHPRatio, FVector HitLocation);
+    void CreateVentHole(FVector LocalPosition);
+    void UpdateVentHoleEffects(float DeltaSeconds);
+    void NotifyRoomVentHoleCreated();
+    float GetBackdraftPressureFromRoom() const;
 
     // ===== Door VFX =====
 private:
@@ -254,4 +331,22 @@ private:
 
     UFUNCTION()
     void OnRoomBackdraftTriggered();
+
+    FTimerHandle BackdraftDelayTimer;
+    FTransform PendingBackdraftDoorTM;
+    float PendingBackdraftVentBoost;
+    ARoomActor* PendingBackdraftRoom = nullptr;
+
+    // 딜레이 후 호출될 함수
+    void ExecuteDelayedBackdraft();
+
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Backdraft")
+    bool bDoorCanBeBlownOff = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Backdraft")
+    float BackdraftDoorImpulse = 800.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Backdraft")
+    float BackdraftDoorTorque = 500.f;
 };
