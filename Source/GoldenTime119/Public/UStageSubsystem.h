@@ -41,7 +41,10 @@ private:
     TMap<FName, TWeakObjectPtr<ARoomActor>> RoomsByTag;
 
     float StepTimeAcc = 0.f;
+    FTimerHandle TickHandle;
 
+    UFUNCTION()
+    void TickStage();
 private:
     void BuildAutoBindings(UWorld* World);
     void BindRoomSignals(ARoomActor* Room);
