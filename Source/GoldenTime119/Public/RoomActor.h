@@ -329,6 +329,10 @@ public:
 
     bool CanSustainFire() const { return Oxygen > MinOxygenToSustain; }
 
+    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
+    void IgniteAllCombustiblesInRoom(bool bAllowElectric = false);
+    UFUNCTION(BlueprintPure, Category = "Room|Fire")
+    int32 GetActiveFireCount() const;
     UFUNCTION(BlueprintCallable, Category = "Room|Env")
     FRoomEnvSnapshot GetEnvSnapshot() const;
 
@@ -422,8 +426,7 @@ private:
     UFUNCTION() void OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
         UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-    UFUNCTION(BlueprintCallable, Category = "Room|Fire")
-    void IgniteAllCombustiblesInRoom(bool bAllowElectric = false);
+    
 
 public:
     // ===== 백드래프트 압력 (환기 구멍 시스템) =====

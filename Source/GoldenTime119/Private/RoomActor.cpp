@@ -18,7 +18,10 @@ static FORCEINLINE FVector GetActorCenter(AActor* A)
 {
     return IsValid(A) ? A->GetComponentsBoundingBox(true).GetCenter() : FVector::ZeroVector;
 }
-
+int32 ARoomActor::GetActiveFireCount() const
+{
+    return ActiveFires.Num();
+}
 // 여러 Vent(0..1)를 “확률 합성”으로 결합: 1 - Π(1 - Vi)
 static float CombineVents_Prob(const TArray<float>& Vents)
 {
