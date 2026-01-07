@@ -349,4 +349,7 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Backdraft")
     float BackdraftDoorTorque = 500.f;
+
+    UPROPERTY(EditAnywhere, Category = "VFX|Leak")
+    float LeakMinWhenArmed = 0.3f;  // Armed 상태일 때 최소 연기량
 };
