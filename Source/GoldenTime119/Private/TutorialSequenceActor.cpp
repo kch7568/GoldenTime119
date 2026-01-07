@@ -33,19 +33,19 @@ void ATutorialSequenceActor::BeginPlay()
 		BindDebugInput();
 	}
 
-	// WorldSubtitleAnchorActor 바인딩
-	AWorldSubtitleAnchorActor* Anchor = Cast<AWorldSubtitleAnchorActor>(
-		UGameplayStatics::GetActorOfClass(this, AWorldSubtitleAnchorActor::StaticClass())
+	// FollowSubtitleActor 바인딩
+	AFollowSubtitleActor* Anchor = Cast<AFollowSubtitleActor>(
+		UGameplayStatics::GetActorOfClass(this, AFollowSubtitleActor::StaticClass())
 	);
 
 	if (Anchor)
 	{
-		OnSubtitle.AddDynamic(Anchor, &ASubtitleBaseActor::HandleTutorialSubtitle);
-		DebugPrint(TEXT("[Tutorial] Bound to WorldSubtitleAnchorActor OK"));
+		OnSubtitle.AddDynamic(Anchor, &AFollowSubtitleActor::HandleTutorialSubtitle);
+		DebugPrint(TEXT("[Tutorial] Bound to FollowSubtitleActor OK"));
 	}
 	else
 	{
-		DebugPrint(TEXT("[Tutorial] WorldSubtitleAnchorActor NOT FOUND in level"));
+		DebugPrint(TEXT("[Tutorial] FollowSubtitleActor NOT FOUND in level"));
 	}
 }
 
