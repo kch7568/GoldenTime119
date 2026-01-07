@@ -2,6 +2,8 @@
 #include "GasTankActor.h"
 #include "PressureVesselComponent.h"
 #include "CombustibleComponent.h"
+#include "FireActor.h"
+#include "RoomActor.h"
 #include "Components/StaticMeshComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGasTank, Log, All);
@@ -113,13 +115,78 @@ void AGasTankActor::OnBLEVETriggered(FVector ExplosionLocation)
     UE_LOG(LogGasTank, Error, TEXT("[GasTank] ====== BLEVE! ====== %s at %s"),
         *GetName(), *ExplosionLocation.ToString());
 
+    // 1) 탱크 메시 즉시 숨기기
     if (IsValid(TankMesh))
     {
         TankMesh->SetVisibility(false);
         TankMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     }
 
-    SetLifeSpan(10.0f);
+    // 2) 이 액터에 Attach된 모든 FireActor 찾아서 제거
+    TArray<AActor*> AttachedActors;
+    GetAttachedActors(AttachedActors);
+
+    for (AActor* Attached : AttachedActors)
+    {
+        AFireActor* Fire = Cast<AFireActor>(Attached);
+        if (IsValid(Fire))
+        {
+            UE_LOG(LogGasTank, Error, TEXT("[GasTank] Found attached FireActor: %s"), *Fire->GetName());
+
+            Fire->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+            ARoomActor* Room = Fire->LinkedRoom.Get();
+            if (IsValid(Room))
+            {
+                Room->UnregisterFire(Fire->FireID);
+            }
+
+            if (IsValid(Fire->FirePsc))
+            {
+                Fire->FirePsc->DeactivateSystem();
+                Fire->FirePsc->SetVisibility(false);
+            }
+
+            Fire->SetActorHiddenInGame(true);
+            Fire->SetActorTickEnabled(false);
+            Fire->Destroy();
+        }
+    }
+
+    // 3) Combustible의 ActiveFire도 체크 (혹시 있으면)
+    if (IsValid(Combustible))
+    {
+        AFireActor* Fire = Combustible->ActiveFire.Get();
+        if (IsValid(Fire))
+        {
+            UE_LOG(LogGasTank, Error, TEXT("[GasTank] Found Combustible->ActiveFire: %s"), *Fire->GetName());
+
+            Fire->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+            ARoomActor* Room = Fire->LinkedRoom.Get();
+            if (IsValid(Room))
+            {
+                Room->UnregisterFire(Fire->FireID);
+            }
+
+            if (IsValid(Fire->FirePsc))
+            {
+                Fire->FirePsc->DeactivateSystem();
+                Fire->FirePsc->SetVisibility(false);
+            }
+
+            Fire->SetActorHiddenInGame(true);
+            Fire->SetActorTickEnabled(false);
+            Fire->Destroy();
+        }
+
+        Combustible->bIsBurning = false;
+        Combustible->ActiveFire = nullptr;
+        Combustible->Fuel.FuelCurrent = 0.f;
+    }
+
+    // 4) 가스탱크 즉시 삭제
+    Destroy();
 }
 
 void AGasTankActor::SetTankType(EGasTankType NewType)
