@@ -125,8 +125,11 @@ void ARoomActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
+    // DeltaTime 클램핑 (최대 0.1초 = 10 FPS)
+    const float ClampedDelta = FMath::Min(DeltaSeconds, 0.1f);
+
     // 1) Fire → Room 영향 반영 (주의: Smoke(권위)는 여기서 직접 누적하지 않음)
-    ApplyAccumulators(DeltaSeconds);
+    ApplyAccumulators(ClampedDelta);
 
     // 2) Door → Vent 합성 (멀티 도어)
     if (bEnableDoorVentAggregation)
@@ -135,27 +138,27 @@ void ARoomActor::Tick(float DeltaSeconds)
         NP.Vent01 = FMath::Clamp(NP.Vent01, 0.f, 1.f);
 
     // 3) Door 기반 방-방 / 방-밖 교환 (UpperSmoke/O2 중심)
-    ApplyDoorExchange(DeltaSeconds);
+    ApplyDoorExchange(ClampedDelta);
 
     // 4) Neutral Plane 업데이트 (UpperSmoke01, NPZ, UpperTempC)
     if (bEnableNeutralPlane)
-        UpdateNeutralPlane(DeltaSeconds);
+        UpdateNeutralPlane(ClampedDelta);
 
     // 5) (핵심) NP -> LowerSmoke/Smoke 최종 합성
-    RebuildSmokeFromNP(DeltaSeconds);
-    ApplyOxygenCapBySmoke(DeltaSeconds);
+    RebuildSmokeFromNP(ClampedDelta);
+    ApplyOxygenCapBySmoke(ClampedDelta);
 
     // 6) 화재 꺼짐/환기 시 env 회복 (연기 소실은 "문 환기"로만)
-    RelaxEnv(DeltaSeconds);
+    RelaxEnv(ClampedDelta);
 
     // 7) Backdraft 장전 평가 (sealed는 Vent 기반)
     if (bEnableBackdraft)
-        EvaluateBackdraftArming(DeltaSeconds);
+        EvaluateBackdraftArming(ClampedDelta);
 
     // 환기 구멍으로 인한 압력 감소
-    UpdateBackdraftPressure(DeltaSeconds);
+    UpdateBackdraftPressure(ClampedDelta);
 
-    UpdateBackdraftReadyAndLeak(DeltaSeconds);
+    UpdateBackdraftReadyAndLeak(ClampedDelta);
 
     // 8) Smoke Volumes
     if (bEnableSmokeVolume)
@@ -854,24 +857,19 @@ bool ARoomActor::CanArmBackdraft() const
         UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Smoke %.2f < Min %.2f"), Smoke, Backdraft.SmokeMin);
         return false;
     }
-    /* 불이 꺼져도 백드래프트는 나오게 수정함
-    if (FireValue < Backdraft.FireValueMin)
-    {
-        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - FireValue %.1f < Min %.1f"), FireValue, Backdraft.FireValueMin);
-        return false;
-    }
-    */
+
     if (Oxygen > Backdraft.O2Max)
     {
         UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Oxygen %.2f > Max %.2f"), Oxygen, Backdraft.O2Max);
         return false;
     }
+    /*
     if (Heat < Backdraft.HeatMin)
     {
         UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] FAIL - Heat %.1f < Min %.1f"), Heat, Backdraft.HeatMin);
         return false;
     }
-
+    */
     UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] SUCCESS - All conditions met!"));
     return true;
 }
@@ -889,11 +887,18 @@ void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
 {
     if (!bEnableBackdraft) return;
 
+    // 이미 Armed면 절대 리셋 안 함
+    if (bBackdraftArmed)
+    {
+        UE_LOG(LogRoomActor, Log, TEXT("[Backdraft] Already Armed - skipping evaluation"));
+        return;
+    }
+
     const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
 
-    // 매 틱 상태 로그
-    UE_LOG(LogRoomActor, Log, TEXT("[Backdraft] Check - Sealed:%d Vent:%.3f Armed:%d SealedTime:%.1f"),
-        bSealedNow, NP.Vent01, bBackdraftArmed, SealedTime);
+    // ★ 디버그 로그 추가
+    UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] Eval - Sealed:%d Vent:%.3f SealedTime:%.2f / %.2f"),
+        bSealedNow, NP.Vent01, SealedTime, Backdraft.ArmedHoldSeconds);
 
     if (bSealedNow && CanArmBackdraft())
         SealedTime += DeltaSeconds;
@@ -911,8 +916,7 @@ void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
 
 float ARoomActor::ComputeBackdraftLeakStrength01() const
 {
-    // Ready가 아니면 누출 연출 없음
-    if (!bBackdraftReady) return 0.f;
+    if (!bBackdraftReady && !bBackdraftArmed) return 0.f;
 
     const float S = FMath::Clamp(Smoke, 0.f, 1.f);
 
@@ -927,7 +931,6 @@ float ARoomActor::ComputeBackdraftLeakStrength01() const
 
 void ARoomActor::UpdateBackdraftReadyAndLeak(float DeltaSeconds)
 {
-    // Backdraft 기능 OFF면 Ready 강제 해제
     if (!bEnableBackdraft)
     {
         if (bBackdraftReady)
@@ -939,18 +942,9 @@ void ARoomActor::UpdateBackdraftReadyAndLeak(float DeltaSeconds)
         return;
     }
 
-    // "Ready" 정의:
-    // - (1) sealed 상태여야 함 (Vent 거의 0)
-    // - (2) Backdraft 조건을 만족해야 함 (Smoke/FireValue/O2/Heat)
-    // - (3) 아직 터지기 전(Armed 되기 전) ~ Armed 직전까지 연출/연소 억제
-    //
-    // 여기서는 "CanArmBackdraft() && bSealedNow"를 Ready로 잡고,
-    // Armed가 되면 Ready는 유지해도 되고(문틈 연기 계속) / 끄고 싶으면 끄면 됩니다.
     const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
     const bool bCanArm = CanArmBackdraft();
-
-    // 기본 정책: sealed + canarm 이면 Ready ON
-    const bool bNewReady = (bSealedNow && bCanArm);
+    const bool bNewReady = (bSealedNow && bCanArm) || bBackdraftArmed;
 
     if (bNewReady != bBackdraftReady)
     {
@@ -958,19 +952,32 @@ void ARoomActor::UpdateBackdraftReadyAndLeak(float DeltaSeconds)
         OnBackdraftReadyChanged.Broadcast(bBackdraftReady);
     }
 
-    // 누출 강도는 Ready 중에만 의미 있음
     const float Leak01 = ComputeBackdraftLeakStrength01();
+
+    UE_LOG(LogRoomActor, Warning, TEXT("[Leak] Ready:%d Armed:%d Smoke:%.2f Leak01:%.3f"),
+        bBackdraftReady, bBackdraftArmed, Smoke, Leak01);
+
     OnBackdraftLeakStrength.Broadcast(Leak01);
 }
 
 void ARoomActor::TriggerBackdraft(const FTransform& DoorTM, float VentBoost01)
 {
+    UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] TriggerBackdraft called - Armed:%d Pressure:%.2f"),
+        bBackdraftArmed, BackdraftPressure);
+
     const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
     if (Now - LastBackdraftTime < Backdraft.CooldownSeconds)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] BLOCKED - Cooldown (%.1f < %.1f)"),
+            Now - LastBackdraftTime, Backdraft.CooldownSeconds);
         return;
+    }
 
     if (!bBackdraftArmed)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] BLOCKED - Not Armed!"));
         return;
+    }
 
     LastBackdraftTime = Now;
     bBackdraftArmed = false;

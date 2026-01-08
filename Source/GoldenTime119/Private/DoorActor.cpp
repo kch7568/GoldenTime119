@@ -890,7 +890,8 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
             if (bAArmed)
             {
                 bShouldLeak = true;
-                TargetLeak = LeakFromRoomA01;
+                // Armed 상태면 최소 LeakMin 보장, 또는 Room에서 받은 값 사용
+                TargetLeak = FMath::Max(LeakFromRoomA01, LeakMinWhenArmed);
                 SetLeakSideToOutsideFromRoomA();
             }
         }
@@ -899,20 +900,22 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
             if (bAArmed && !bBArmed)
             {
                 bShouldLeak = true;
-                TargetLeak = LeakFromRoomA01;
+                TargetLeak = FMath::Max(LeakFromRoomA01, LeakMinWhenArmed);
                 SetLeakSideToRoomB();
             }
             else if (bBArmed && !bAArmed)
             {
                 bShouldLeak = true;
-                TargetLeak = LeakFromRoomB01;
+                TargetLeak = FMath::Max(LeakFromRoomB01, LeakMinWhenArmed);
                 SetLeakSideToRoomA();
             }
         }
     }
 
-    if (bShouldLeak && TargetLeak > 0.001f)
+    if (bShouldLeak && !SmokeLeakPSC->IsActive())
+    {
         SmokeLeakPSC->ActivateSystem(true);
+    }
 
     LeakValSmoothed = FMath::FInterpTo(LeakValSmoothed, bShouldLeak ? TargetLeak : 0.f, DeltaSeconds, LeakInterpSpeed);
     SmokeLeakPSC->SetFloatParameter(LeakParamName, LeakValSmoothed);
