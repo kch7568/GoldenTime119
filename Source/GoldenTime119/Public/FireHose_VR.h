@@ -146,7 +146,7 @@ public:
 
     // VR에서 노즐 회전 계산용
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
-    float BarrelGrabStartYaw;
+    float BarrelGrabStartRoll;
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
     TObjectPtr<USceneComponent> GrabbingBarrelController;

@@ -217,7 +217,7 @@ void AFireHose_VR::OnBarrelGrabbed(USceneComponent* GrabbingController)
 {
     bIsGrabbedBarrel = true;
     GrabbingBarrelController = GrabbingController;
-    BarrelGrabStartYaw = GrabbingController->GetComponentRotation().Yaw;
+    BarrelGrabStartRoll = GrabbingController->GetComponentRotation().Roll;
 
     UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Barrel Grabbed (Left Hand)"));
 }
@@ -242,8 +242,8 @@ void AFireHose_VR::UpdateVRLeverFromController()
     PullDirection.Normalize();
 
     FVector CurrentPull = CurrentLocation - LeverGrabStartLocation;
-    float PullDistance = FVector::DotProduct(CurrentPull, -GetActorUpVector());
-
+    float PullDistance = FVector::DotProduct(CurrentPull, GetActorUpVector());
+        
     // 당김 거리를 0~1로 변환 (10cm = 100% 당김)
     float PullAmount = FMath::Clamp(PullDistance / 10.f, 0.f, 1.f);
 
@@ -254,17 +254,23 @@ void AFireHose_VR::UpdateVRBarrelFromController()
 {
     if (!IsValid(GrabbingBarrelController)) return;
 
-    float CurrentYaw = GrabbingBarrelController->GetComponentRotation().Yaw;
-    float YawDelta = CurrentYaw - BarrelGrabStartYaw;
+    // 컨트롤러의 현재 회전값 가져오기
+    FRotator CurrentRot = GrabbingBarrelController->GetComponentRotation();
 
-    // Yaw 변화를 노즐 회전으로 변환
-    float NewRotation = BarrelRotation + YawDelta;
+    // 이전 프레임과의 Roll(손목 비틀기) 차이 계산
+    // BarrelGrabStartYaw 대신 BarrelGrabStartRoll을 사용하도록 헤더도 수정 필요
+    float CurrentRoll = CurrentRot.Roll;
+    float RollDelta = CurrentRoll - BarrelGrabStartRoll;
+
+    // 회전 감도 조절 (0.5 ~ 1.5 사이에서 취향껏 조절)
+    float Sensitivity = 1.8f;
+    float NewRotation = BarrelRotation + (RollDelta * Sensitivity);
+
     NewRotation = FMath::Clamp(NewRotation, 0.f, 180.f);
-
     SetBarrelRotation(NewRotation);
 
-    // 시작 Yaw 업데이트 (연속 회전 가능하도록)
-    BarrelGrabStartYaw = CurrentYaw;
+    // 다음 프레임을 위해 업데이트
+    BarrelGrabStartRoll = CurrentRoll;
 }
 
 void AFireHose_VR::SetLeverPull(float PullAmount)
@@ -437,6 +443,7 @@ void AFireHose_VR::UpdateMode()
         UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode Changed: %s (Barrel: %.1f)"),
             CurrentMode == EHoseMode_VR::Focused ? TEXT("Focused") : TEXT("Spray"), BarrelRotation);
     }
+
 }
 
 FVector AFireHose_VR::GetNozzleLocation() const
