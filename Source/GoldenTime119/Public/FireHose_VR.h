@@ -229,4 +229,6 @@ private:
 
     bool bInputBound = false;
     bool bTestFiring = false;
+
+    bool bWaterVFXActive = false;
 };

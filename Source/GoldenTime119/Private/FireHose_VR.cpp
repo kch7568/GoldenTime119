@@ -29,9 +29,9 @@ AFireHose_VR::AFireHose_VR()
     BarrelMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BarrelMesh"));
     BarrelMesh->SetupAttachment(BarrelPivot);
 
-    // WaterSpawnPoint
+    // WaterSpawnPoint, 테스트
     WaterSpawnPoint = CreateDefaultSubobject<USceneComponent>(TEXT("WaterSpawnPoint"));
-    WaterSpawnPoint->SetupAttachment(BarrelMesh);
+    WaterSpawnPoint->SetupAttachment(BodyMesh);
 
     // WaterPsc
     WaterPsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("WaterPSC"));
@@ -88,21 +88,15 @@ void AFireHose_VR::Tick(float DeltaSeconds)
     Super::Tick(DeltaSeconds);
 
     // VR: 손 위치에 따라 레버/노즐 업데이트
-    if (bIsGrabbedLever && IsValid(GrabbingLeverController))
-    {
-        UpdateVRLeverFromController();
-    }
-
-    if (bIsGrabbedBarrel && IsValid(GrabbingBarrelController))
-    {
-        UpdateVRBarrelFromController();
-    }
+    if (bIsGrabbedLever && IsValid(GrabbingLeverController)) UpdateVRLeverFromController();
+    if (bIsGrabbedBarrel && IsValid(GrabbingBarrelController)) UpdateVRBarrelFromController();
 
     UpdatePressure(DeltaSeconds);
     UpdateBarrelRotation(DeltaSeconds);
     UpdateMode();
 
-    bool bShouldFire = (bIsGrabbedBody || bTestFiring) && (PressureAlpha > 0.01f);
+    /// VFX가 실제로 보이기 시작하는 수치(0.05)와 판정 시점을 일치시킵니다.
+    bool bShouldFire = (PressureAlpha > 0.05f);
 
     if (bShouldFire)
     {
@@ -232,22 +226,19 @@ void AFireHose_VR::OnBarrelReleased()
 
 void AFireHose_VR::UpdateVRLeverFromController()
 {
-    if (!IsValid(GrabbingLeverController)) return;
+    if (!IsValid(GrabbingLeverController) || !IsValid(LeverPivot)) return;
 
-    FVector CurrentLocation = GrabbingLeverController->GetComponentLocation();
-    FVector LeverPivotLocation = LeverPivot->GetComponentLocation();
+    // 1. 컨트롤러의 월드 위치를 레버 피벗 기준 로컬 좌표로 변환
+    FVector ControllerLocalPos = LeverPivot->GetComponentTransform().InverseTransformPosition(GrabbingLeverController->GetComponentLocation());
 
-    // 손이 피벗에서 얼마나 당겨졌는지 계산
-    FVector PullDirection = LeverPivotLocation - LeverGrabStartLocation;
-    PullDirection.Normalize();
+    // 2. 피벗 기준 아래 방향(-Z축)으로 당겨진 거리 계산
+    float PullDistance = -ControllerLocalPos.Z;
 
-    FVector CurrentPull = CurrentLocation - LeverGrabStartLocation;
-    float PullDistance = FVector::DotProduct(CurrentPull, GetActorUpVector());
-        
-    // 당김 거리를 0~1로 변환 (10cm = 100% 당김)
-    float PullAmount = FMath::Clamp(PullDistance / 10.f, 0.f, 1.f);
+    // 3. 0cm ~ 15cm 범위를 0.0 ~ 1.0 수압으로 매핑 (당길수록 수압 증가)
+    float NewPressure = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 15.f), FVector2D(0.f, 1.0f), PullDistance);
 
-    SetLeverPull(PullAmount);
+    // 4. 수치 적용 (제곱근을 써서 당길 때 더 쫀득한 느낌 부여 가능)
+    SetLeverPull(NewPressure);
 }
 
 void AFireHose_VR::UpdateVRBarrelFromController()
@@ -342,41 +333,38 @@ void AFireHose_VR::StopFiring()
 
 void AFireHose_VR::UpdatePressure(float DeltaSeconds)
 {
-    if (TargetPressure > PressureAlpha)
+    float InterpSpeed = (TargetPressure > PressureAlpha) ? PressureIncreaseSpeed : PressureDecreaseSpeed;
+    PressureAlpha = FMath::FInterpTo(PressureAlpha, TargetPressure, DeltaSeconds, InterpSpeed);
+
+    // 제로 스냅 로직: 레버를 놓았을 때 수압이 낮아지면 즉시 0으로 만들어 잔상을 제거합니다.
+    if (TargetPressure <= 0.0f && PressureAlpha < 0.05f)
     {
-        PressureAlpha = FMath::FInterpTo(PressureAlpha, TargetPressure, DeltaSeconds, PressureIncreaseSpeed);
-    }
-    else
-    {
-        PressureAlpha = FMath::FInterpTo(PressureAlpha, TargetPressure, DeltaSeconds, PressureDecreaseSpeed);
+        PressureAlpha = 0.0f;
     }
 
     PressureAlpha = FMath::Clamp(PressureAlpha, 0.f, 1.f);
+    LeverPullAmount = PressureAlpha;
+    UpdateLeverVisual();
 
-    // PC 테스트: 수압에 따라 레버 시각적 업데이트
-    if (bTestFiring || !bIsGrabbedLever)
+    if (PressureAlpha > 0.05f)
     {
-        LeverPullAmount = PressureAlpha;
-        UpdateLeverVisual();
-    }
-
-    if (IsValid(WaterPsc))
-    {
+        // 매 프레임 파라미터 업데이트
         WaterPsc->SetFloatParameter(TEXT("Pressure"), PressureAlpha);
 
-        if (PressureAlpha > 0.01f)
+        if (!bWaterVFXActive)
         {
-            if (!WaterPsc->IsActive())
-            {
-                WaterPsc->ActivateSystem(true);
-            }
+            bWaterVFXActive = true;
+            WaterPsc->ActivateSystem(true);
         }
-        else
+    }
+    else
+    {
+        WaterPsc->SetFloatParameter(TEXT("Pressure"), 0.f);
+
+        if (bWaterVFXActive)
         {
-            if (WaterPsc->IsActive())
-            {
-                WaterPsc->DeactivateSystem();
-            }
+            bWaterVFXActive = false;
+            WaterPsc->DeactivateSystem();
         }
     }
 }
@@ -480,22 +468,14 @@ void AFireHose_VR::CalculateWaterPath(TArray<FVector>& OutPoints)
     FVector Forward = GetNozzleForward();
 
     float Range = (CurrentMode == EHoseMode_VR::Focused) ? FocusedRange : SprayRange;
-    float Gravity = WaterGravity;
-
     Range *= PressureAlpha;
-
-    if (CurrentMode == EHoseMode_VR::Focused)
-    {
-        Gravity *= 0.3f;
-    }
 
     for (int32 i = 0; i <= TraceSegments; i++)
     {
         float T = (float)i / (float)TraceSegments;
         float Distance = Range * T;
-        float Drop = Gravity * T * T * (2.f - PressureAlpha);
 
-        FVector Point = StartPos + (Forward * Distance) - FVector(0, 0, Drop);
+        FVector Point = StartPos + (Forward * Distance);
         OutPoints.Add(Point);
     }
 }
@@ -526,12 +506,13 @@ void AFireHose_VR::TraceAlongWaterPath(float DeltaSeconds)
         FVector SegmentStart = WaterPath[i];
         FVector SegmentEnd = WaterPath[i + 1];
         FVector SegmentCenter = (SegmentStart + SegmentEnd) * 0.5f;
-
+        /* 디버그용, 물줄기의 범위, 불을 감지하는지 확인
         if (bDebugDraw)
         {
             DrawDebugLine(GetWorld(), SegmentStart, SegmentEnd, FColor::Cyan, false, 0.0f, 0, 2.0f * PressureAlpha);
             DrawDebugSphere(GetWorld(), SegmentCenter, Radius * PressureAlpha, 8, FColor::Blue, false, 0.0f, 0, 1.0f);
         }
+        */
 
         TArray<AActor*> OutActors;
         bool bHit = UKismetSystemLibrary::SphereOverlapActors(
@@ -563,11 +544,12 @@ void AFireHose_VR::TraceAlongWaterPath(float DeltaSeconds)
                     Comb->AddWaterContact(FinalAmount);
                     HitActors.Add(HitActor);
 
+                    /* 디버그용, 물줄기의 범위, 불을 감지하는지 확인
                     if (bDebugDraw)
                     {
                         DrawDebugSphere(GetWorld(), HitActor->GetActorLocation(), 50.f, 8, FColor::Green, false, 0.1f);
                     }
-
+                    */
                     UE_LOG(LogHoseVR, Verbose, TEXT("[HoseVR] WATER HIT: %s Amount=%.3f Pressure=%.2f"),
                         *GetNameSafe(HitActor), FinalAmount, PressureAlpha);
                 }
