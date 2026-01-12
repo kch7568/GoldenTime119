@@ -71,7 +71,13 @@ void UVitalComponent::SetCurrentRoom(ARoomActor* InRoom)
 {
     CurrentRoom = InRoom;
     PrevHp01 = PrevTemp01 = PrevO201 = -1.f;
+
+    UE_LOG(LogTemp, Warning, TEXT("[Vital] SetCurrentRoom -> %s"), *GetNameSafe(InRoom));
+
+    // 방 들어갈 때 즉시 UI 갱신 보고 싶으면 강제 브로드캐스트 1회
+    BroadcastIfChanged(true);
 }
+
 
 // ---------- Tick ----------
 void UVitalComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)

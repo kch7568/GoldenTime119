@@ -9,6 +9,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
+#include "VitalComponent.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -94,6 +98,8 @@ void ARoomActor::BeginPlay()
 {
     Super::BeginPlay();
 
+    EnsureRoomBoundsAndBindOverlap();
+
     Debug_RescanCombustibles();
     UpdateRoomGeometryFromBounds();
 
@@ -116,9 +122,13 @@ void ARoomActor::BeginPlay()
     bBackdraftArmed = false;
     LastBackdraftTime = -1000.f;
 
-    UE_LOG(LogRoomActor, Warning,
-        TEXT("[Room] BeginPlay Room=%s Combustibles=%d Doors=%d FloorZ=%.1f CeilingZ=%.1f NPZ=%.1f"),
-        *GetName(), Combustibles.Num(), Doors.Num(), FloorZ, CeilingZ, NP.NeutralPlaneZ);
+    UE_LOG(LogTemp, Warning, TEXT("[Room] BeginPlay %s RoomBounds=%s GenOverlap=%d CollisionEnabled=%d ObjType=%d"),
+        *GetName(),
+        *GetNameSafe(RoomBounds),
+        RoomBounds ? RoomBounds->GetGenerateOverlapEvents() : -1,
+        RoomBounds ? (int32)RoomBounds->GetCollisionEnabled() : -1,
+        RoomBounds ? (int32)RoomBounds->GetCollisionObjectType() : -1
+    );
 }
 
 void ARoomActor::Tick(float DeltaSeconds)
@@ -642,10 +652,32 @@ void ARoomActor::UpdateNeutralPlane(float DeltaSeconds)
 void ARoomActor::OnRoomBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
     UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(
+            -1, 2.0f, FColor::Yellow,
+            FString::Printf(TEXT("[RoomOverlap] %s"), *GetNameSafe(OtherActor))
+        );
+    }
+    UE_LOG(LogTemp, Warning, TEXT("[RoomOverlap] Other=%s Comp=%s"),
+        *GetNameSafe(OtherActor), *GetNameSafe(OtherComp));
+
     if (!IsValid(OtherActor) || OtherActor == this) return;
 
-    UCombustibleComponent* Comb = OtherActor->FindComponentByClass<UCombustibleComponent>();
-    if (Comb)
+
+    // 1) 플레이어 진입 처리
+    if (OtherActor->ActorHasTag(TEXT("Player")) || Cast<APawn>(OtherActor))
+    {
+        if (UVitalComponent* Vital = OtherActor->FindComponentByClass<UVitalComponent>())
+        {
+            Vital->SetCurrentRoom(this);
+            UE_LOG(LogRoomActor, Log, TEXT("[Room] Player entered. Bind CurrentRoom=%s -> %s"),
+                *GetNameSafe(OtherActor), *GetName());
+        }
+    }
+
+    // 2) 기존 combustible 처리 유지
+    if (UCombustibleComponent* Comb = OtherActor->FindComponentByClass<UCombustibleComponent>())
     {
         RegisterCombustible(Comb);
         UE_LOG(LogRoomActor, VeryVerbose, TEXT("[Room] Overlap+ Combustible=%s"), *GetNameSafe(OtherActor));
@@ -657,8 +689,21 @@ void ARoomActor::OnRoomEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* O
 {
     if (!IsValid(OtherActor)) return;
 
-    UCombustibleComponent* Comb = OtherActor->FindComponentByClass<UCombustibleComponent>();
-    if (Comb)
+    // 1) 플레이어 이탈 처리 (현재 Room이 나 자신일 때만 null 처리)
+    if (OtherActor->ActorHasTag(TEXT("Player")))
+    {
+        if (UVitalComponent* Vital = OtherActor->FindComponentByClass<UVitalComponent>())
+        {
+            if (Vital->GetCurrentRoom() == this)
+            {
+                Vital->SetCurrentRoom(nullptr);
+                UE_LOG(LogRoomActor, Log, TEXT("[Room] Player exited. Unbind CurrentRoom=%s"), *GetName());
+            }
+        }
+    }
+
+    // 2) 기존 combustible 처리 유지
+    if (UCombustibleComponent* Comb = OtherActor->FindComponentByClass<UCombustibleComponent>())
     {
         UnregisterCombustible(Comb);
         UE_LOG(LogRoomActor, VeryVerbose, TEXT("[Room] Overlap- Combustible=%s"), *GetNameSafe(OtherActor));
@@ -1163,6 +1208,114 @@ void ARoomActor::UpdateBackdraftPressure(float DeltaSeconds)
             bBackdraftReady = false;
             OnBackdraftReadyChanged.Broadcast(false);
             OnBackdraftLeakStrength.Broadcast(0.f);
+        }
+    }
+}
+
+void ARoomActor::PostInitializeComponents()
+{
+    Super::PostInitializeComponents();
+    EnsureRoomBoundsAndBindOverlap();
+}
+
+UBoxComponent* ARoomActor::FindBestRoomBoundsCandidate() const
+{
+    TArray<UBoxComponent*> Boxes;
+    GetComponents<UBoxComponent>(Boxes);
+
+    // 1) 이름이 RoomBounds인 박스 우선
+    for (UBoxComponent* B : Boxes)
+    {
+        if (IsValid(B) && B->GetFName() == TEXT("RoomBounds"))
+            return B;
+    }
+
+    // 2) 컴포넌트 태그로 RoomBounds 지정한 게 있으면 그걸
+    for (UBoxComponent* B : Boxes)
+    {
+        if (IsValid(B) && B->ComponentHasTag(TEXT("RoomBounds")))
+            return B;
+    }
+
+    // 3) Root가 박스면 그걸
+    if (UBoxComponent* RootBox = Cast<UBoxComponent>(GetRootComponent()))
+        return RootBox;
+
+    // 4) 그 외: 가장 큰 박스
+    UBoxComponent* Best = nullptr;
+    float BestVol = -1.f;
+    for (UBoxComponent* B : Boxes)
+    {
+        if (!IsValid(B)) continue;
+        const FVector E = B->GetScaledBoxExtent();
+        const float V = E.X * E.Y * E.Z;
+        if (V > BestVol) { BestVol = V; Best = B; }
+    }
+    return Best;
+}
+
+void ARoomActor::EnsureRoomBoundsAndBindOverlap()
+{
+    // RoomBounds가 실제 사용 컴포넌트와 다를 수 있으니 재확정
+    UBoxComponent* Candidate = FindBestRoomBoundsCandidate();
+    if (Candidate && Candidate != RoomBounds)
+    {
+        UE_LOG(LogRoomActor, Warning, TEXT("[Room] RoomBounds remapped: %s -> %s"),
+            *GetNameSafe(RoomBounds), *GetNameSafe(Candidate));
+        RoomBounds = Candidate;
+    }
+
+    if (!IsValid(RoomBounds)) return;
+
+    // 충돌/오버랩 설정 재보장 (BP에서 덮어쓴 경우 대비)
+    RoomBounds->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    RoomBounds->SetGenerateOverlapEvents(true);
+    RoomBounds->SetCollisionObjectType(ECC_WorldDynamic);
+    RoomBounds->SetCollisionResponseToAllChannels(ECR_Ignore);
+    RoomBounds->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Overlap);
+    RoomBounds->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Overlap);
+    RoomBounds->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+
+    // 중복 바인딩 방지 + 재바인딩
+    RoomBounds->OnComponentBeginOverlap.RemoveAll(this);
+    RoomBounds->OnComponentEndOverlap.RemoveAll(this);
+    RoomBounds->OnComponentBeginOverlap.AddDynamic(this, &ARoomActor::OnRoomBeginOverlap);
+    RoomBounds->OnComponentEndOverlap.AddDynamic(this, &ARoomActor::OnRoomEndOverlap);
+
+    // 시작 시 오버랩 상태 갱신(스트리밍/스폰/텔포 대응)
+    RoomBounds->UpdateOverlaps();
+
+    // “이미 안에 있었던” 애들 동기화
+    SyncInitialOverlaps();
+
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] EnsureRoomBounds OK. Room=%s Bounds=%s"),
+        *GetName(), *GetNameSafe(RoomBounds));
+}
+
+void ARoomActor::SyncInitialOverlaps()
+{
+    if (!IsValid(RoomBounds)) return;
+
+    TArray<AActor*> Overlapping;
+    RoomBounds->GetOverlappingActors(Overlapping);
+
+    for (AActor* A : Overlapping)
+    {
+        if (!IsValid(A) || A == this) continue;
+
+        // 플레이어 초기 진입 동기화
+        if (A->ActorHasTag(TEXT("Player")))
+        {
+            if (UVitalComponent* Vital = A->FindComponentByClass<UVitalComponent>())
+            {
+                Vital->SetCurrentRoom(this);
+            }
+        }
+
+        // 가연물 초기 등록 동기화
+        if (UCombustibleComponent* Comb = A->FindComponentByClass<UCombustibleComponent>())
+        {
+            RegisterCombustible(Comb);
         }
     }
 }
