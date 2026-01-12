@@ -97,6 +97,12 @@ void ADoorActor::Tick(float DeltaSeconds)
             }
         }
 
+        // 문이 잡힌 상태일 때만 업데이트 함수 실행
+        if (bIsGrabbed)
+        {
+            UpdateDoorFromController();
+        }
+
         if (bDebugOpening)
         {
             SetOpenAmount01(OpenAmount01 + DebugOpenSpeed * DeltaSeconds);
@@ -726,6 +732,12 @@ void ADoorActor::TryTriggerBackdraftIfNeeded(bool bFromBreach)
 }
 void ADoorActor::ExecuteDelayedBackdraft()
 {
+    // 문이 폭발로 날아가기 전에 잡고 있는 손이 있다면 강제 해제
+    if (bIsGrabbed)
+    {
+        OnReleased_Implementation(GrabbingController, true);
+    }
+
     if (!IsValid(PendingBackdraftRoom))
     {
         UE_LOG(LogDoorActor, Warning, TEXT("[Door] Delayed backdraft cancelled - Room invalid"));
@@ -945,4 +957,67 @@ void ADoorActor::OnRoomBackdraftTriggered()
     {
         SetOpenAmount01(1.0f);
     }
+}
+
+// 문 잡을 수 있는지 여부 확인
+bool ADoorActor::CanBeGrabbed_Implementation() const
+{
+    // 문이 부서진 상태가 아닐 때만 잡기 가능
+    return DoorState != EDoorState::Breached;
+}
+
+// 문을 잡았을 때 (Started)
+void ADoorActor::OnGrabbed_Implementation(USceneComponent* InController, bool bIsLeftHand)
+{
+    if (!InController || !CachedHinge) return;
+
+    bIsGrabbed = true;
+    GrabbingController = InController;
+
+    // 1. 힌지 위치와 손 위치 사이의 초기 각도 저장
+    FVector HingeLoc = CachedHinge->GetComponentLocation();
+    FVector HandLoc = InController->GetComponentLocation();
+    FVector Dir = (HandLoc - HingeLoc).GetSafeNormal2D();
+
+    // 수학적 각도($atan2$)를 사용하여 초기 Yaw 기록
+    InitialHandYaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
+
+    // 2. 잡는 순간의 문 열림 수치 기록
+    InitialOpenAmount = OpenAmount01;
+
+    UE_LOG(LogDoorActor, Warning, TEXT("[Door] Grabbed by %s hand"), bIsLeftHand ? TEXT("Left") : TEXT("Right"));
+}
+
+// 문을 놓았을 때 (Completed)
+void ADoorActor::OnReleased_Implementation(USceneComponent* InController, bool bIsLeftHand)
+{
+    bIsGrabbed = false;
+    GrabbingController = nullptr;
+    UE_LOG(LogDoorActor, Log, TEXT("[Door] Released"));
+}
+void ADoorActor::UpdateDoorFromController()
+{
+    if (!bIsGrabbed || !GrabbingController || !CachedHinge) return;
+
+    // 1. 현재 손의 위치에 따른 각도 계산
+    FVector HingeLoc = CachedHinge->GetComponentLocation();
+    FVector HandLoc = GrabbingController->GetComponentLocation();
+    FVector Dir = (HandLoc - HingeLoc).GetSafeNormal2D();
+    float CurrentHandYaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
+
+    // 2. 초기 각도와 현재 각도의 차이($\Delta$) 계산
+    // FindDeltaAngleDegrees를 써야 180도에서 -180도로 넘어갈 때 문이 튀지 않습니다.
+    float YawDelta = FMath::FindDeltaAngleDegrees(InitialHandYaw, CurrentHandYaw);
+
+    // 문이 열리는 방향 설정(Positive/Negative)에 따른 보정
+    if (OpenDirection == EDoorOpenDirection::NegativeYaw)
+    {
+        YawDelta *= -1.f;
+    }
+
+    // 3. 각도 변화량을 0.0~1.0 사이의 OpenAmount로 변환
+    float DeltaAmount = YawDelta / MaxOpenYawDeg;
+
+    // 4. 최종 값 적용 (Clamp는 SetOpenAmount01 내부에서 처리됨)
+    SetOpenAmount01(InitialOpenAmount + DeltaAmount);
 }

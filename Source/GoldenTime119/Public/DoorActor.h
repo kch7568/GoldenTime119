@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GrabInteractable.h"
 #include "GameFramework/Actor.h"
 #include "DoorActor.generated.h"
 
@@ -62,7 +63,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDoorOpenAmountChanged, float, OpenA
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnVentHoleCreated, int32, TotalHoleCount);
 
 UCLASS()
-class GOLDENTIME119_API ADoorActor : public AActor
+class GOLDENTIME119_API ADoorActor : public AActor, public IGrabInteractable
 {
     GENERATED_BODY()
 
@@ -352,4 +353,22 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "VFX|Leak")
     float LeakMinWhenArmed = 0.3f;  // Armed 상태일 때 최소 연기량
+
+    // IGrabInteractable 인터페이스 구현
+    virtual void OnGrabbed_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
+    virtual void OnReleased_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
+    virtual bool CanBeGrabbed_Implementation() const override;
+protected:
+    // [추가] VR 상호작용 관련 내부 변수
+    UPROPERTY(VisibleAnywhere, Category = "Door|VR")
+    bool bIsGrabbed = false;
+
+    UPROPERTY(VisibleAnywhere, Category = "Door|VR")
+    TObjectPtr<USceneComponent> GrabbingController = nullptr;
+
+    float InitialHandYaw = 0.f;
+    float InitialOpenAmount = 0.f;
+
+    // [추가] 매 프레임 문 각도를 업데이트하는 함수
+    void UpdateDoorFromController();
 };
