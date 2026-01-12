@@ -17,6 +17,10 @@ class GOLDENTIME119_API UVitalComponent : public UActorComponent
 public:
     UVitalComponent();
 
+
+    UFUNCTION(BlueprintCallable, Category = "Vitals")
+    ARoomActor* GetCurrentRoom() const { return CurrentRoom.Get(); }
+
     // ===== Events =====
     UPROPERTY(BlueprintAssignable, Category = "Vitals")
     FOnVitals01Changed OnVitals01Changed;

@@ -358,10 +358,15 @@ public:
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
+    virtual void PostInitializeComponents() override;
 
 private:
     UPROPERTY() TSet<TWeakObjectPtr<UCombustibleComponent>> Combustibles;
     UPROPERTY() TMap<FGuid, TObjectPtr<AFireActor>> ActiveFires;
+
+    void EnsureRoomBoundsAndBindOverlap();
+    UBoxComponent* FindBestRoomBoundsCandidate() const;
+    void SyncInitialOverlaps();
 
     float AccHeat = 0.f;
     float AccSmoke = 0.f;
