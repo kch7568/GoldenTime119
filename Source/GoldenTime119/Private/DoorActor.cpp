@@ -72,6 +72,11 @@ void ADoorActor::BeginPlay()
 void ADoorActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+    // 문이 잡힌 상태일 때만 업데이트 함수 실행
+    if (bIsGrabbed)
+    {
+        UpdateDoorFromController();
+    }
 
     // Debug input
     if (bEnableDebugOpen && DoorState != EDoorState::Breached)
@@ -96,13 +101,6 @@ void ADoorActor::Tick(float DeltaSeconds)
                 bDebugClosing = !bShouldOpen;
             }
         }
-
-        // 문이 잡힌 상태일 때만 업데이트 함수 실행
-        if (bIsGrabbed)
-        {
-            UpdateDoorFromController();
-        }
-
         if (bDebugOpening)
         {
             SetOpenAmount01(OpenAmount01 + DebugOpenSpeed * DeltaSeconds);
