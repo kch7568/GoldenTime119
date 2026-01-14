@@ -3,6 +3,7 @@
 #include "CombustibleComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/PlayerController.h"
@@ -45,14 +46,34 @@ AFireHose_VR::AFireHose_VR()
     // LeverMesh
     LeverMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("LeverMesh"));
     LeverMesh->SetupAttachment(LeverPivot);
+
+    // ============================================================
+    // Audio
+    // ============================================================
+    AC_HoseSpray = CreateDefaultSubobject<UAudioComponent>(TEXT("AC_HoseSpray"));
+    AC_HoseSpray->SetupAttachment(WaterSpawnPoint);
+    AC_HoseSpray->bAutoActivate = false;
 }
 
 void AFireHose_VR::BeginPlay()
 {
     Super::BeginPlay();
+
     CurrentMode = EHoseMode_VR::Focused; // 기본 모드: 집중
     BarrelRotation = 0.f;                // 각도 초기화
     UpdateWaterVFX();
+
+    // Sound assign
+    if (AC_HoseSpray && Snd_HoseSprayLoop)
+    {
+        AC_HoseSpray->SetSound(Snd_HoseSprayLoop);
+        ApplyModeFilter();
+    }
+
+    if (bEnableKeyboardTest)
+    {
+        SetupKeyboardTest();
+    }
 }
 
 void AFireHose_VR::SetupKeyboardTest()
@@ -86,6 +107,9 @@ void AFireHose_VR::Tick(float DeltaSeconds)
     UpdatePressure(DeltaSeconds);
     UpdateBarrelRotation(DeltaSeconds);
     UpdateMode();
+
+    // 오디오(루프 볼륨 Lerp/Fade + 모드 필터)
+    UpdateAudio(DeltaSeconds);
 
     /// VFX가 실제로 보이기 시작하는 수치(0.05)와 판정 시점을 일치시킵니다.
     bool bShouldFire = (PressureAlpha > 0.05f);
@@ -222,7 +246,7 @@ void AFireHose_VR::OnBarrelReleased()
     // 1. 만약 90도를 다 돌리지 못하고 놓았다면 (bModeSwappedInThisGrab이 false라면)
     if (!bModeSwappedInThisGrab)
     {
-        // 내부 값을 잡기 전 상태로 초기화 (예: 268도 -> 180도)
+        // 내부 값을 잡기 전 상태로 초기화
         TargetBarrelRotation = RotationAtGrabStart;
 
         UE_LOG(LogHoseVR, Warning, TEXT("임계값 미달! 이전 각도(%.1f)로 복구합니다."), RotationAtGrabStart);
@@ -232,8 +256,6 @@ void AFireHose_VR::OnBarrelReleased()
         // 2. 90도를 다 돌렸다면 현재 위치(90도의 배수 지점)에 고정
         TargetBarrelRotation = BarrelRotation;
     }
-
-    // UpdateBarrelRotation 함수가 TargetBarrelRotation까지 부드럽게 메쉬를 돌려줍니다.
 }
 
 void AFireHose_VR::UpdateVRLeverFromController()
@@ -246,10 +268,10 @@ void AFireHose_VR::UpdateVRLeverFromController()
     // 2. 피벗 기준 아래 방향(-Z축)으로 당겨진 거리 계산
     float PullDistance = -ControllerLocalPos.Z;
 
-    // 3. 0cm ~ 15cm 범위를 0.0 ~ 1.0 수압으로 매핑 (당길수록 수압 증가)
+    // 3. 0cm ~ 15cm 범위를 0.0 ~ 1.0 수압으로 매핑
     float NewPressure = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 15.f), FVector2D(0.f, 1.0f), PullDistance);
 
-    // 4. 수치 적용 (제곱근을 써서 당길 때 더 쫀득한 느낌 부여 가능)
+    // 4. 수치 적용
     SetLeverPull(NewPressure);
 }
 
@@ -270,10 +292,10 @@ void AFireHose_VR::UpdateVRBarrelFromController()
     float MoveDistance = FMath::Abs(LocalHandPos.Y - PreviousLocalBarrelHandPos.Y);
     float RotationToAdd = MoveDistance * BarrelSensitivity;
 
-    // 2. 이번 그랩 세션에서 설정된 임계값(RotationThresholdPerGrab)까지만 회전
+    // 2. 이번 그랩 세션에서 설정된 임계값까지만 회전
     if (!bModeSwappedInThisGrab)
     {
-        float Remaining = RotationThresholdPerGrab - CurrentGrabRotationSum; // 90.f
+        float Remaining = RotationThresholdPerGrab - CurrentGrabRotationSum;
         float ActualAdd = FMath::Min(RotationToAdd, Remaining);
 
         CurrentGrabRotationSum += ActualAdd;
@@ -332,6 +354,9 @@ void AFireHose_VR::SetMode(EHoseMode_VR NewMode)
         TargetBarrelRotation = (NewMode == EHoseMode_VR::Focused) ? 0.f : 180.f;
         UpdateWaterVFX();
 
+        // 모드 변경 시 필터 갱신
+        ApplyModeFilter();
+
         UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode: %s"),
             CurrentMode == EHoseMode_VR::Focused ? TEXT("Focused") : TEXT("Spray"));
     }
@@ -365,7 +390,7 @@ void AFireHose_VR::UpdatePressure(float DeltaSeconds)
     float InterpSpeed = (TargetPressure > PressureAlpha) ? PressureIncreaseSpeed : PressureDecreaseSpeed;
     PressureAlpha = FMath::FInterpTo(PressureAlpha, TargetPressure, DeltaSeconds, InterpSpeed);
 
-    // 제로 스냅 로직: 레버를 놓았을 때 수압이 낮아지면 즉시 0으로 만들어 잔상을 제거합니다.
+    // 제로 스냅 로직
     if (TargetPressure <= 0.0f && PressureAlpha < 0.05f)
     {
         PressureAlpha = 0.0f;
@@ -377,7 +402,6 @@ void AFireHose_VR::UpdatePressure(float DeltaSeconds)
 
     if (PressureAlpha > 0.05f)
     {
-        // 매 프레임 파라미터 업데이트
         WaterPsc->SetFloatParameter(TEXT("Pressure"), PressureAlpha);
 
         if (!bWaterVFXActive)
@@ -414,22 +438,18 @@ void AFireHose_VR::UpdateBarrelVisual()
     if (!IsValid(BarrelPivot)) return;
 
     FRotator NewRotation = FRotator::ZeroRotator;
-    // 기존 Roll(X)에서 Yaw(Z)로 변경
     NewRotation.Yaw = BarrelRotation;
     BarrelPivot->SetRelativeRotation(NewRotation);
 }
 
-// 2. 손잡이(레버) 부분 업데이트: Y축(Pitch) 회전 및 -70도 제한
+// 2. 손잡이(레버) 부분 업데이트: Y축(Pitch) 회전
 void AFireHose_VR::UpdateLeverVisual()
 {
     if (!IsValid(LeverPivot)) return;
 
-    // LeverPullAmount(0~1)에 최대 회전각을 곱함
-    // LeverMaxRotation 값을 70.0f로 설정하면 0 ~ -70도 사이를 움직이게 됩니다.
     float RotationAngle = LeverPullAmount * LeverMaxRotation;
 
     FRotator NewRotation = FRotator::ZeroRotator;
-    // Y축 회전(Pitch) 적용
     NewRotation.Pitch = RotationAngle;
     LeverPivot->SetRelativeRotation(NewRotation);
 }
@@ -450,17 +470,16 @@ void AFireHose_VR::UpdateWaterVFX()
 
 void AFireHose_VR::UpdateMode()
 {
-    // 90도 단위로 몇 번째 구간에 있는지 계산합니다.
-    // 0~90도 = 0 (짝수), 90~180도 = 1 (홀수), 180~270도 = 2 (짝수) ...
     int32 RotationStep = FMath::FloorToInt(BarrelRotation / 90.f);
-
-    // 짝수 구간은 Focused, 홀수 구간은 Spray로 결정
     EHoseMode_VR NewMode = (RotationStep % 2 == 0) ? EHoseMode_VR::Focused : EHoseMode_VR::Spray;
 
     if (NewMode != CurrentMode)
     {
         CurrentMode = NewMode;
         UpdateWaterVFX();
+
+        // 모드 변경 시 필터 갱신
+        ApplyModeFilter();
 
         UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode Swapped to %s (Step: %d, Rotation: %.1f)"),
             CurrentMode == EHoseMode_VR::Focused ? TEXT("Focused") : TEXT("Spray"),
@@ -519,6 +538,9 @@ void AFireHose_VR::TraceAlongWaterPath(float DeltaSeconds)
     TArray<FVector> WaterPath;
     CalculateWaterPath(WaterPath);
 
+    // ===== Impact OneShot: 물 끝점이 월드에 닿는 경우 =====
+    TryPlayImpactOneShot(WaterPath);
+
     float Radius = (CurrentMode == EHoseMode_VR::Focused) ? FocusedRadius : SprayRadius;
     float WaterAmount = (CurrentMode == EHoseMode_VR::Focused) ? FocusedWaterAmount : SprayWaterAmount;
     float Range = (CurrentMode == EHoseMode_VR::Focused) ? FocusedRange : SprayRange;
@@ -540,13 +562,6 @@ void AFireHose_VR::TraceAlongWaterPath(float DeltaSeconds)
         FVector SegmentStart = WaterPath[i];
         FVector SegmentEnd = WaterPath[i + 1];
         FVector SegmentCenter = (SegmentStart + SegmentEnd) * 0.5f;
-        /* 디버그용, 물줄기의 범위, 불을 감지하는지 확인
-        if (bDebugDraw)
-        {
-            DrawDebugLine(GetWorld(), SegmentStart, SegmentEnd, FColor::Cyan, false, 0.0f, 0, 2.0f * PressureAlpha);
-            DrawDebugSphere(GetWorld(), SegmentCenter, Radius * PressureAlpha, 8, FColor::Blue, false, 0.0f, 0, 1.0f);
-        }
-        */
 
         TArray<AActor*> OutActors;
         bool bHit = UKismetSystemLibrary::SphereOverlapActors(
@@ -578,16 +593,105 @@ void AFireHose_VR::TraceAlongWaterPath(float DeltaSeconds)
                     Comb->AddWaterContact(FinalAmount);
                     HitActors.Add(HitActor);
 
-                    /* 디버그용, 물줄기의 범위, 불을 감지하는지 확인
-                    if (bDebugDraw)
-                    {
-                        DrawDebugSphere(GetWorld(), HitActor->GetActorLocation(), 50.f, 8, FColor::Green, false, 0.1f);
-                    }
-                    */
                     UE_LOG(LogHoseVR, Verbose, TEXT("[HoseVR] WATER HIT: %s Amount=%.3f Pressure=%.2f"),
                         *GetNameSafe(HitActor), FinalAmount, PressureAlpha);
                 }
             }
         }
     }
+}
+
+// ============================================================
+// Audio: 1_Hose Loop Fade/Lerp + Mode Filter + Impact OneShot
+// ============================================================
+
+void AFireHose_VR::UpdateAudio(float DeltaSeconds)
+{
+    if (!AC_HoseSpray || !AC_HoseSpray->Sound) return;
+
+    const bool bSprayActive = (PressureAlpha > AudioOnThreshold);
+
+    if (bSprayActive)
+    {
+        if (!AC_HoseSpray->IsPlaying())
+        {
+            // 시작 시 FadeIn (클릭 방지)
+            AC_HoseSpray->FadeIn(HoseFadeInSec, 1.0f);
+        }
+
+        // 볼륨은 PressureAlpha로 Lerp(이미 PressureAlpha가 FInterpTo로 부드럽게 움직임)
+        const float Vol = FMath::Clamp(PressureAlpha, 0.f, 1.f) * HoseVolumeMax;
+        AC_HoseSpray->SetVolumeMultiplier(Vol);
+    }
+    else
+    {
+        if (AC_HoseSpray->IsPlaying())
+        {
+            AC_HoseSpray->FadeOut(HoseFadeOutSec, 0.0f);
+        }
+    }
+}
+
+void AFireHose_VR::ApplyModeFilter()
+{
+    if (!AC_HoseSpray) return;
+
+    if (!bEnableModeFilter)
+    {
+        AC_HoseSpray->SetLowPassFilterEnabled(false);
+        return;
+    }
+
+    AC_HoseSpray->SetLowPassFilterEnabled(true);
+
+    const float TargetHz = (CurrentMode == EHoseMode_VR::Focused) ? Focused_LPF_Hz : Spray_LPF_Hz;
+    AC_HoseSpray->SetLowPassFilterFrequency(TargetHz);
+}
+
+// 물줄기 끝점이 월드(바닥/벽 등)에 닿으면 impact one-shot 재생
+void AFireHose_VR::TryPlayImpactOneShot(const TArray<FVector>& WaterPath)
+{
+    if (!Snd_WaterHitFloorHeavy_OneShot) return;
+    if (PressureAlpha <= AudioOnThreshold) return;
+    if (WaterPath.Num() < 2) return;
+
+    const float Now = GetWorld()->GetTimeSeconds();
+    if (Now - LastImpactPlayTime < ImpactMinIntervalSec) return;
+
+    // 끝점 방향으로 살짝 더 뻗어서 라인트레이스
+    const FVector EndA = WaterPath.Last();
+    const FVector EndB = EndA + (GetNozzleForward() * 60.f); // 60cm 더
+
+    FHitResult Hit;
+    FCollisionQueryParams Params(SCENE_QUERY_STAT(HoseImpactTrace), false, this);
+
+    const bool bHit = GetWorld()->LineTraceSingleByChannel(
+        Hit,
+        EndA,
+        EndB,
+        ECC_Visibility,
+        Params
+    );
+
+    if (bDebugDraw)
+    {
+        DrawDebugLine(GetWorld(), EndA, EndB, bHit ? FColor::Green : FColor::Red, false, 0.f, 0, 1.0f);
+        if (bHit) DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 8.f, FColor::Yellow, false, 0.f);
+    }
+
+    if (!bHit) return;
+
+    // 월드 정적/동적 상관없이 "뭔가에 부딪혔다"면 재생
+    const float Vol = FMath::Clamp(PressureAlpha, 0.f, 1.f) * ImpactVolumeMax;
+    const float Pitch = FMath::FRandRange(ImpactPitchMin, ImpactPitchMax);
+
+    UGameplayStatics::PlaySoundAtLocation(
+        this,
+        Snd_WaterHitFloorHeavy_OneShot,
+        Hit.ImpactPoint,
+        Vol,
+        Pitch
+    );
+
+    LastImpactPlayTime = Now;
 }

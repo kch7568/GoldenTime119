@@ -4,6 +4,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
 #include "GrabInteractable.h"
 #include "FireHose_VR.generated.h"
 
@@ -59,6 +61,59 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|VFX")
     TObjectPtr<UParticleSystem> SprayWaterTemplate;
+
+    // ============================================================
+    // Audio (요청사항: 1_Hose 루프 + Impact OneShot)
+    // ============================================================
+
+    // 1_Hose_Spray_Loop
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    TObjectPtr<USoundBase> Snd_HoseSprayLoop;
+
+    // 2_Water_Hit_Floor_Heavy_OneShot
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    TObjectPtr<USoundBase> Snd_WaterHitFloorHeavy_OneShot;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Audio")
+    TObjectPtr<UAudioComponent> AC_HoseSpray;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseVolumeMax = 1.0f;
+
+    // VFX와 같은 임계로 On/Off 판단
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float AudioOnThreshold = 0.05f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseFadeInSec = 0.20f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseFadeOutSec = 0.60f;
+
+    // 모드별 필터(LowPass) 전환
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    bool bEnableModeFilter = true;
+
+    // Focused: 더 “쏘는” 느낌(필터 덜 먹임 → 컷오프 높게)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    float Focused_LPF_Hz = 18000.f;
+
+    // Spray: 더 “거친 분무/확산” 느낌(필터 더 먹임 → 컷오프 낮게)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    float Spray_LPF_Hz = 9000.f;
+
+    // Impact OneShot 스팸 방지
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactMinIntervalSec = 0.08f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactVolumeMax = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactPitchMin = 0.95f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactPitchMax = 1.05f;
 
     // ============================================================
     // 상태 변수
@@ -227,6 +282,11 @@ private:
     FVector GetNozzleLocation() const;
     FVector GetNozzleForward() const;
 
+    // Audio helpers
+    void UpdateAudio(float DeltaSeconds);
+    void ApplyModeFilter();
+    void TryPlayImpactOneShot(const TArray<FVector>& WaterPath);
+
     bool bInputBound = false;
     bool bTestFiring = false;
 
@@ -245,4 +305,7 @@ private:
     float BarrelSensitivity = 2.5f;            // 비비기 민감도
 
     float RotationAtGrabStart = 0.f;  // 잡기 시작한 시점의 BarrelRotation 저장용
+
+    // Impact spam gate
+    float LastImpactPlayTime = -1000.f;
 };
