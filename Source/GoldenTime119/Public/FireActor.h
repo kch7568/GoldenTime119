@@ -4,7 +4,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "CombustibleType.h"
-#include "FireRuntimeTuning.h" // 분리 헤더
+#include "FireRuntimeTuning.h"
 #include "FireActor.generated.h"
 
 class ARoomActor;
@@ -12,6 +12,8 @@ class USceneComponent;
 class UCombustibleComponent;
 class UParticleSystem;
 class UParticleSystemComponent;
+class UAudioComponent;
+class USoundBase;
 
 UCLASS()
 class GOLDENTIME119_API AFireActor : public AActor
@@ -27,6 +29,28 @@ public:
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fire|VFX")
     TObjectPtr<UParticleSystemComponent> FirePsc = nullptr;
+
+    // ===== Audio (Fire Loop) =====
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    TObjectPtr<UAudioComponent> FireLoopAudio = nullptr;
+
+    // 2_Heavy_Fire_Loop
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    TObjectPtr<USoundBase> HeavyFireLoopSound = nullptr;
+
+    // 3_Fire_Extinguish (OneShot)
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    TObjectPtr<USoundBase> FireExtinguishOneShotSound = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    float FireLoopFadeIn = 0.15f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    float FireLoopFadeOut = 0.25f;
+
+    // 원샷이 너무 연속으로 나가는 것을 방지(동일 FireActor에서 1회만 재생)
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fire|Audio")
+    bool bPlayExtinguishOneShot = true;
 
     // ===== Runtime Data =====
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Data")
@@ -71,7 +95,6 @@ public:
     UPROPERTY(VisibleInstanceOnly, Category = "Fire|VFX")
     float Strength01 = 1.f;
 
-    // (옵션) BP가 참고할 수 있는 최종 스케일
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Fire|Backdraft")
     float BackdraftScale01 = 1.f;
 
@@ -105,6 +128,8 @@ private:
     bool bInitialized = false;
     bool bIsActive = false;
 
+    bool bPlayedExtinguishOneShot = false;
+
 private:
     void UpdateRuntimeFromRoom(float DeltaSeconds);
     void SubmitInfluenceToRoom();
@@ -113,7 +138,7 @@ private:
 
     bool ShouldExtinguish() const;
     void UpdateVfx(float DeltaSeconds);
+    void UpdateAudio(float DeltaSeconds);
 
-    // ===== Helpers =====
-    float GetCombustionScaleFromRoom() const; // Backdraft ready 등
+    float GetCombustionScaleFromRoom() const;
 };

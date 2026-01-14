@@ -40,39 +40,45 @@ void AValveActor::Tick(float DeltaTime)
 
     if (bIsValveBeingTurned && CurrentGrabbingController)
     {
-        // 1. 손의 회전 변화량 계산 (손목을 비트는 Roll 양을 사용할지, Yaw를 사용할지는 취향 차이입니다)
-        FRotator CurrentHandRot = CurrentGrabbingController->GetComponentRotation();
-        FRotator DeltaRot = CurrentHandRot - InitialHandRotation;
+        // 1. 현재 손의 로컬 위치 계산
+        FVector CurrentLocalPos = ValveMesh->GetComponentTransform().InverseTransformPosition(CurrentGrabbingController->GetComponentLocation());
 
-        // 2. 밸브의 초기 Yaw 각도에 손의 회전 변화량을 더함
-        // 밸브를 옆으로 돌리기 위해 'Yaw'를 조절합니다.
-        float NewRotation = FMath::Clamp(InitialValveRotation.Yaw + DeltaRot.Roll, 0.0f, TargetRotation);
+        if (bIsFirstTick) {
+            PreviousLocalHandPos = CurrentLocalPos;
+            bIsFirstTick = false;
+            return;
+        }
 
-        // 3. FRotator의 두 번째 인자인 Yaw에 NewRotation을 넣습니다.
-        ValveMesh->SetRelativeRotation(FRotator(0, NewRotation, 0));
+        // 2. 이전 위치와의 차이(Y축)를 구해 절대값으로 더함 (좌우 어디로 흔들든 누적됨)
+        float MoveDistance = FMath::Abs(CurrentLocalPos.Y - PreviousLocalHandPos.Y);
+        CurrentRotationSum += (MoveDistance * Sensitivity);
 
-        // 4. 목표 각도 도달 체크
-        if (NewRotation >= TargetRotation && !bIsTriggered)
-        {
-            if (TargetSprinkler)
-            {
+        // 3. 180도(TargetRotation)까지만 제한하여 적용
+        CurrentRotationSum = FMath::Min(CurrentRotationSum, TargetRotation);
+        ValveMesh->SetRelativeRotation(FRotator(0, CurrentRotationSum, 0));
+
+        // 4. 다음 프레임 계산을 위해 현재 위치를 이전 위치로 저장
+        PreviousLocalHandPos = CurrentLocalPos;
+
+        // 5. 목표 도달 시 스프링클러 발동
+        if (CurrentRotationSum >= TargetRotation && !bIsTriggered) {
+            if (TargetSprinkler) {
                 TargetSprinkler->ActivateWater();
                 bIsTriggered = true;
-                bIsValveBeingTurned = false;
+                bIsValveBeingTurned = false; // 완료 시 더 이상 계산 안 함
             }
         }
     }
 }
 void AValveActor::OnGrabbed_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand)
 {
-    if (!bIsTriggered) // 이미 다 열린 게 아니라면
+    if (!bIsTriggered)
     {
         bIsValveBeingTurned = true;
         CurrentGrabbingController = GrabbingController;
 
-        // 잡는 순간의 상태를 스냅샷처럼 저장하여 기준점으로 삼음
-        InitialHandRotation = GrabbingController->GetComponentRotation();
-        InitialValveRotation = ValveMesh->GetRelativeRotation();
+        // 잡는 순간을 기준으로 삼기 위해 플래그 설정
+        bIsFirstTick = true;
     }
 }
 void AValveActor::OnReleased_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand)

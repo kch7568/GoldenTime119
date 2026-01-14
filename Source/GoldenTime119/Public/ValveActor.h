@@ -51,12 +51,17 @@ public :
     // VR 인터페이스 함수
     virtual void OnGrabbed_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
     virtual void OnReleased_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
-private:
-    // 물리적 회전을 추적하기 위한 핵심 변수들
-    bool bIsValveBeingTurned = false;        // 현재 손으로 돌리고 있는지 여부
-    UPROPERTY()
-    USceneComponent* CurrentGrabbingController = nullptr; // 잡고 있는 컨트롤러
+    // ValveActor.h
 
-    FRotator InitialHandRotation;            // 잡는 순간의 손 회전값
-    FRotator InitialValveRotation;           // 잡는 순간의 밸브 회전값
+private:
+    bool bIsValveBeingTurned = false;
+    bool bIsFirstTick = false;
+
+    FVector PreviousLocalHandPos;        // 이전 프레임 손 위치 저장용
+
+    UPROPERTY(EditAnywhere, Category = "Settings")
+    float Sensitivity = 0.7f;            // 이동량을 회전으로 바꾸는 배율
+
+    UPROPERTY()
+    USceneComponent* CurrentGrabbingController = nullptr;
 };

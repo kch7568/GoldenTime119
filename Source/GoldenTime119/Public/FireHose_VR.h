@@ -4,6 +4,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
 #include "GrabInteractable.h"
 #include "FireHose_VR.generated.h"
 
@@ -23,7 +25,7 @@ public:
     AFireHose_VR();
 
     // ============================================================
-    // 메시 컴포넌트
+    // Mesh
     // ============================================================
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Mesh")
@@ -51,7 +53,7 @@ public:
     TObjectPtr<UParticleSystemComponent> WaterPsc;
 
     // ============================================================
-    // VFX 템플릿
+    // VFX Templates
     // ============================================================
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|VFX")
@@ -61,7 +63,53 @@ public:
     TObjectPtr<UParticleSystem> SprayWaterTemplate;
 
     // ============================================================
-    // 상태 변수
+    // Audio (Loop + Impact OneShot)
+    // ============================================================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    TObjectPtr<USoundBase> Snd_HoseSprayLoop; // 1_Hose_Spray_Loop
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    TObjectPtr<USoundBase> Snd_WaterHitFloorHeavy_OneShot; // 2_Water_Hit_Floor_Heavy_OneShot
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Hose|Audio")
+    TObjectPtr<UAudioComponent> AC_HoseSpray;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseVolumeMax = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float AudioOnThreshold = 0.05f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseFadeInSec = 0.20f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio")
+    float HoseFadeOutSec = 0.60f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    bool bEnableModeFilter = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    float Focused_LPF_Hz = 18000.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Filter")
+    float Spray_LPF_Hz = 9000.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactMinIntervalSec = 2.0f; // 요청: 2초
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactVolumeMax = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactPitchMin = 0.95f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Audio|Impact")
+    float ImpactPitchMax = 1.05f;
+
+    // ============================================================
+    // State
     // ============================================================
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "Hose|State")
@@ -92,7 +140,7 @@ public:
     float TargetBarrelRotation = 0.f;
 
     // ============================================================
-    // 설정값
+    // Tunables
     // ============================================================
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Focused")
@@ -119,9 +167,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Curve")
     int32 TraceSegments = 10;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Curve")
-    bool bDebugDraw = true;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Pressure")
     float PressureIncreaseSpeed = 3.0f;
 
@@ -134,25 +179,21 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Barrel")
     float BarrelRotationSpeed = 5.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hose|Debug")
-    bool bEnableKeyboardTest = true;
+    // ============================================================
+    // VR refs
+    // ============================================================
 
-    // VR에서 손 위치 저장 (레버 당김 계산용)
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
     FVector LeverGrabStartLocation;
 
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
     TObjectPtr<USceneComponent> GrabbingLeverController;
 
-    // VR에서 노즐 회전 계산용
-    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
-    float BarrelGrabStartRoll;
-
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Hose|VR")
     TObjectPtr<USceneComponent> GrabbingBarrelController;
 
     // ============================================================
-    // IGrabInteractable 인터페이스 구현
+    // IGrabInteractable
     // ============================================================
 
     virtual void OnGrabbed_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
@@ -161,7 +202,7 @@ public:
     virtual FTransform GetGrabTransform_Implementation(bool bIsLeftHand) const override;
 
     // ============================================================
-    // VR용 함수
+    // VR API
     // ============================================================
 
     UFUNCTION(BlueprintCallable, Category = "Hose|VR")
@@ -189,7 +230,7 @@ public:
     void SetBarrelRotation(float RotationDegrees);
 
     // ============================================================
-    // 일반 제어 함수
+    // Control
     // ============================================================
 
     UFUNCTION(BlueprintCallable, Category = "Hose|Control")
@@ -227,8 +268,28 @@ private:
     FVector GetNozzleLocation() const;
     FVector GetNozzleForward() const;
 
+    // Audio
+    void UpdateAudio(float DeltaSeconds);
+    void ApplyModeFilter();
+    void TryPlayImpactOneShot(const TArray<FVector>& WaterPath);
+
     bool bInputBound = false;
     bool bTestFiring = false;
-
     bool bWaterVFXActive = false;
+
+    FVector PreviousLocalBarrelHandPos;
+    float CurrentGrabRotationSum = 0.f;
+    bool bIsBarrelFirstTick = false;
+
+    UPROPERTY(EditAnywhere, Category = "Hose|Barrel")
+    float RotationThresholdPerGrab = 90.f;
+
+    bool bModeSwappedInThisGrab = false;
+
+    UPROPERTY(EditAnywhere, Category = "Hose|Barrel")
+    float BarrelSensitivity = 2.5f;
+
+    float RotationAtGrabStart = 0.f;
+
+    float LastImpactPlayTime = -1000.f;
 };
