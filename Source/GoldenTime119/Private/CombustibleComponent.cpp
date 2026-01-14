@@ -1,9 +1,11 @@
+// ============================ CombustibleComponent.cpp ============================
 #include "CombustibleComponent.h"
 
 #include "RoomActor.h"
 #include "FireActor.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Components/SceneComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogComb, Log, All);
 
@@ -25,34 +27,50 @@ void UCombustibleComponent::BeginPlay()
     USceneComponent* RootComp = Owner->GetRootComponent();
     if (!IsValid(RootComp)) return;
 
-    const FVector OwnerLocation = Owner->GetActorLocation();
-
-    UE_LOG(LogTemp, Error, TEXT("[Comb] === BeginPlay START === Owner=%s"), *GetNameSafe(Owner));
-    UE_LOG(LogTemp, Error, TEXT("[Comb] BEFORE - SteamTemplate=%s, SteamSound=%s"),
-        *GetNameSafe(SteamTemplate), *GetNameSafe(SteamSound));
-
     EnsureComponentsCreated(Owner, RootComp);
     ApplyTemplatesAndSounds();
 
-    UE_LOG(LogTemp, Error, TEXT("[Comb] AFTER - SteamPsc=%s, SteamAudio=%s"),
-        *GetNameSafe(SteamPsc), *GetNameSafe(SteamAudio));
-
-    if (IsValid(SteamPsc))
-    {
-        UE_LOG(LogTemp, Error, TEXT("[Comb] SteamPsc->Template=%s"), *GetNameSafe(SteamPsc->Template));
-    }
-    if (IsValid(SteamAudio))
-    {
-        UE_LOG(LogTemp, Error, TEXT("[Comb] SteamAudio->Sound=%s"), *GetNameSafe(SteamAudio->Sound));
-    }
-
-    if (!Owner->GetActorLocation().Equals(OwnerLocation, 1.f))
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[Comb] Owner location shifted! Restoring..."));
-        Owner->SetActorLocation(OwnerLocation);
-    }
-
     SetComponentTickEnabled(true);
+}
+
+void UCombustibleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (IsValid(SteamAudio) && SteamAudio->IsPlaying())
+    {
+        SteamAudio->Stop();
+    }
+    if (IsValid(SmolderAudio) && SmolderAudio->IsPlaying())
+    {
+        SmolderAudio->Stop();
+    }
+
+    if (EndPlayReason == EEndPlayReason::Destroyed)
+    {
+        if (IsValid(SteamAudio))
+        {
+            SteamAudio->DestroyComponent();
+            SteamAudio = nullptr;
+        }
+        if (IsValid(SmolderAudio))
+        {
+            SmolderAudio->DestroyComponent();
+            SmolderAudio = nullptr;
+        }
+        if (IsValid(SteamPsc))
+        {
+            SteamPsc->DeactivateSystem();
+            SteamPsc->DestroyComponent();
+            SteamPsc = nullptr;
+        }
+        if (IsValid(SmokePsc))
+        {
+            SmokePsc->DeactivateSystem();
+            SmokePsc->DestroyComponent();
+            SmokePsc = nullptr;
+        }
+    }
+
+    Super::EndPlay(EndPlayReason);
 }
 
 void UCombustibleComponent::ApplyTemplatesAndSounds()
@@ -60,19 +78,21 @@ void UCombustibleComponent::ApplyTemplatesAndSounds()
     if (IsValid(SmokePsc) && SmokeTemplate && SmokePsc->Template != SmokeTemplate)
     {
         SmokePsc->SetTemplate(SmokeTemplate);
-        UE_LOG(LogTemp, Warning, TEXT("[Comb] SmokeTemplate applied: %s"), *GetNameSafe(SmokeTemplate));
     }
 
     if (IsValid(SteamPsc) && SteamTemplate && SteamPsc->Template != SteamTemplate)
     {
         SteamPsc->SetTemplate(SteamTemplate);
-        UE_LOG(LogTemp, Warning, TEXT("[Comb] SteamTemplate applied: %s"), *GetNameSafe(SteamTemplate));
     }
 
     if (IsValid(SteamAudio) && SteamSound && SteamAudio->Sound != SteamSound)
     {
         SteamAudio->SetSound(SteamSound);
-        UE_LOG(LogTemp, Warning, TEXT("[Comb] SteamSound applied: %s"), *GetNameSafe(SteamSound));
+    }
+
+    if (IsValid(SmolderAudio) && SmolderLoopSound && SmolderAudio->Sound != SmolderLoopSound)
+    {
+        SmolderAudio->SetSound(SmolderLoopSound);
     }
 }
 
@@ -133,57 +153,37 @@ void UCombustibleComponent::EnsureComponentsCreated(AActor* Owner, USceneCompone
             }
         }
     }
+
+    // Smolder Audio (훈소 루프)
+    if (!IsValid(SmolderAudio))
+    {
+        SmolderAudio = NewObject<UAudioComponent>(Owner, UAudioComponent::StaticClass(),
+            FName(*FString::Printf(TEXT("SmolderAudio_%d"), FMath::Rand())));
+        if (SmolderAudio)
+        {
+            SmolderAudio->SetupAttachment(RootComp);
+            SmolderAudio->bAutoActivate = false;
+            SmolderAudio->bStopWhenOwnerDestroyed = true;
+            SmolderAudio->RegisterComponent();
+            SmolderAudio->SetRelativeLocation(FVector::ZeroVector);
+            if (SmolderLoopSound)
+            {
+                SmolderAudio->SetSound(SmolderLoopSound);
+            }
+        }
+    }
 }
 
 void UCombustibleComponent::OnComponentCreated()
 {
     Super::OnComponentCreated();
-
-    // 컴포넌트가 처음 생성될 때 호출됨
     bComponentsNeedRecreation = false;
 }
 
 void UCombustibleComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
 {
-    // 레벨 전환 시 컴포넌트가 파괴되면 플래그 설정
     bComponentsNeedRecreation = true;
-
     Super::OnComponentDestroyed(bDestroyingHierarchy);
-}
-
-void UCombustibleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-    // 사운드 정리
-    if (IsValid(SteamAudio) && SteamAudio->IsPlaying())
-    {
-        SteamAudio->Stop();
-    }
-
-    // 레벨 전환이 아닌 경우에만 완전히 파괴
-    if (EndPlayReason == EEndPlayReason::Destroyed)
-    {
-        if (IsValid(SteamAudio))
-        {
-            SteamAudio->DestroyComponent();
-            SteamAudio = nullptr;
-        }
-
-        if (IsValid(SteamPsc))
-        {
-            SteamPsc->DeactivateSystem();
-            SteamPsc->DestroyComponent();
-            SteamPsc = nullptr;
-        }
-
-        if (IsValid(SmokePsc))
-        {
-            SmokePsc->DeactivateSystem();
-            SmokePsc->DestroyComponent();
-            SmokePsc = nullptr;
-        }
-    }
-
-    Super::EndPlay(EndPlayReason);
 }
 
 void UCombustibleComponent::SetOwningRoom(ARoomActor* InRoom)
@@ -191,34 +191,21 @@ void UCombustibleComponent::SetOwningRoom(ARoomActor* InRoom)
     OwningRoom = InRoom;
 }
 
-void UCombustibleComponent::AddIgnitionPressure(const FGuid& SourceFireId, float Pressure)
+void UCombustibleComponent::AddIgnitionPressure(const FGuid& /*SourceFireId*/, float Pressure)
 {
     if (Pressure <= KINDA_SMALL_NUMBER) return;
-
     PendingPressure += Pressure;
-
-    if (const UWorld* World = GetWorld())
-    {
-        LastInputTime = World->GetTimeSeconds();
-    }
 }
 
 void UCombustibleComponent::AddHeat(float HeatDelta)
 {
     if (HeatDelta <= KINDA_SMALL_NUMBER) return;
-
     PendingHeat += HeatDelta;
-
-    if (const UWorld* World = GetWorld())
-    {
-        LastInputTime = World->GetTimeSeconds();
-    }
 }
 
 void UCombustibleComponent::ConsumeFuel(float ConsumeAmount)
 {
     if (ConsumeAmount <= 0.f) return;
-
     Fuel.FuelCurrent = FMath::Max(0.f, Fuel.FuelCurrent - ConsumeAmount);
 }
 
@@ -228,7 +215,6 @@ bool UCombustibleComponent::CanIgniteNow() const
     if (CombustibleType == ECombustibleType::Electric && !bElectricIgnitionTriggered) return false;
     if (Fuel.FuelCurrent <= KINDA_SMALL_NUMBER) return false;
     if (!OwningRoom.IsValid()) return false;
-
     return true;
 }
 
@@ -248,14 +234,16 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
         }
     }
 
-    // 최적화: 활동이 없으면 조기 종료
-    const bool bHasActivity = (PendingPressure > KINDA_SMALL_NUMBER) ||
+    const bool bHasActivity =
+        (PendingPressure > KINDA_SMALL_NUMBER) ||
         (PendingHeat > KINDA_SMALL_NUMBER) ||
         (PendingWater01 > KINDA_SMALL_NUMBER) ||
         IsBurning();
 
     if (!bHasActivity && Ignition.IgnitionProgress01 <= KINDA_SMALL_NUMBER)
     {
+        // 훈소 사운드도 자연스럽게 꺼지게
+        UpdateSmolderAudio(DeltaTime);
         return;
     }
 
@@ -289,40 +277,26 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
         }
     }
 
-    // 3) 수증기 사운드 관리 - ONE SHOT 방식
+    // 3) 수증기 사운드 (기존 one-shot-ish 흐름 유지)
     const bool bWaterHittingFire = IsBurning() && (PendingWater01 > 0.05f);
-
-
-    if (PendingWater01 > 0.01f)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[Steam] DEBUG: Owner=%s IsBurning=%d PendingWater=%.3f bWaterHittingFire=%d"),
-            *GetNameSafe(GetOwner()), IsBurning(), PendingWater01, bWaterHittingFire);
-        UE_LOG(LogTemp, Warning, TEXT("[Steam] DEBUG: SteamPsc Valid=%d, SteamAudio Valid=%d, SteamSound Valid=%d"),
-            IsValid(SteamPsc), IsValid(SteamAudio), SteamSound != nullptr);
-    }
 
     if (IsValid(SteamAudio) && SteamSound)
     {
-        // 물이 처음 닿기 시작했을 때만 재생
         if (bWaterHittingFire && !bWasWaterSoundPlaying)
         {
             if (!SteamAudio->IsPlaying())
             {
                 SteamAudio->Play();
                 bWasWaterSoundPlaying = true;
-                UE_LOG(LogTemp, Warning, TEXT("[Steam] Sound STARTED (ONE-SHOT) on %s"), *GetNameSafe(GetOwner()));
             }
         }
-        // 물이 완전히 끊기면 플래그 리셋
         else if (!bWaterHittingFire && bWasWaterSoundPlaying)
         {
             bWasWaterSoundPlaying = false;
 
-            // 사운드가 아직 재생 중이면 페이드아웃
             if (SteamAudio->IsPlaying())
             {
                 SteamAudio->FadeOut(0.5f, 0.f);
-                UE_LOG(LogTemp, Warning, TEXT("[Steam] Sound FADING OUT on %s"), *GetNameSafe(GetOwner()));
             }
         }
     }
@@ -360,15 +334,17 @@ void UCombustibleComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
             if (!SteamPsc->IsActive())
             {
                 SteamPsc->ActivateSystem(true);
-                UE_LOG(LogTemp, Warning, TEXT("[Steam] VFX ACTIVATED! Steam01=%.2f"), Steam01);
             }
         }
     }
 
-    // 6) 점화 시도
+    // 6) 훈소 사운드(불꽃 전 단계)
+    UpdateSmolderAudio(DeltaTime);
+
+    // 7) 점화 시도
     TryIgnite();
 
-    // 7) 소화 판정
+    // 8) 소화 판정
     if (IsBurning() && (ExtinguishAlpha01 >= 1.f))
     {
         if (IsValid(ActiveFire))
@@ -417,9 +393,6 @@ void UCombustibleComponent::OnIgnited()
     ARoomActor* Room = OwningRoom.Get();
     if (!IsValid(Room)) return;
 
-    UE_LOG(LogComb, Warning, TEXT("[Comb] IGNITE Owner=%s Room=%s Type=%d"),
-        *GetNameSafe(GetOwner()), *GetNameSafe(Room), static_cast<int32>(CombustibleType));
-
     AFireActor* NewFire = Room->SpawnFireForCombustible(this, CombustibleType);
     if (!IsValid(NewFire))
     {
@@ -430,14 +403,18 @@ void UCombustibleComponent::OnIgnited()
     ActiveFire = NewFire;
     bIsBurning = true;
     Ignition.IgnitionProgress01 = 0.f;
+
+    // 불꽃이 생기면 훈소는 즉시 정리
+    if (IsValid(SmolderAudio) && SmolderAudio->IsPlaying())
+    {
+        SmolderAudio->FadeOut(SmolderFadeOut, 0.f);
+    }
 }
 
 void UCombustibleComponent::OnExtinguished()
 {
     bIsBurning = false;
     ActiveFire = nullptr;
-
-    // 소화 시 사운드 플래그도 리셋
     bWasWaterSoundPlaying = false;
 }
 
@@ -476,7 +453,42 @@ void UCombustibleComponent::EnsureFuelInitialized()
     }
 }
 
-void UCombustibleComponent::AddWaterContact(float Amount01, bool bTriggerSound)
+void UCombustibleComponent::AddWaterContact(float Amount01, bool /*bTriggerSound*/)
 {
     PendingWater01 = FMath::Clamp(PendingWater01 + Amount01, 0.f, 1.5f);
+}
+
+void UCombustibleComponent::UpdateSmolderAudio(float /*DeltaTime*/)
+{
+    if (!IsValid(SmolderAudio) || !SmolderLoopSound)
+        return;
+
+    // 훈소 정의:
+    // - 불꽃이 아직 없음
+    // - 점화 진행도가 일정 이상
+    const bool bSmoldering = (!IsBurning() && (Ignition.IgnitionProgress01 >= SmolderStartProgress));
+
+    if (bSmoldering)
+    {
+        if (!SmolderAudio->IsPlaying())
+        {
+            SmolderAudio->Play();
+            SmolderAudio->FadeIn(SmolderFadeIn, 1.f);
+        }
+
+        // 진행도에 따른 볼륨(원하면 삭제 가능)
+        const float Den = FMath::Max(0.001f, (Ignition.IgniteThreshold - SmolderStartProgress));
+        const float Vol = FMath::Clamp((Ignition.IgnitionProgress01 - SmolderStartProgress) / Den, 0.f, 1.f);
+        SmolderAudio->SetVolumeMultiplier(Vol);
+    }
+    else
+    {
+        // 히스테리시스: 많이 내려갔거나, 불이 붙으면 종료
+        const bool bShouldStop = IsBurning() || (Ignition.IgnitionProgress01 <= SmolderStopProgress);
+
+        if (bShouldStop && SmolderAudio->IsPlaying())
+        {
+            SmolderAudio->FadeOut(SmolderFadeOut, 0.f);
+        }
+    }
 }

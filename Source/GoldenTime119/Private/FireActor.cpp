@@ -6,6 +6,10 @@
 
 #include "Components/SceneComponent.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
+#include "Kismet/GameplayStatics.h"
+
 #include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFireActor, Log, All);
@@ -16,7 +20,6 @@ static FORCEINLINE FVector GetOwnerCenterFromComb(const UCombustibleComponent* C
     return IsValid(A) ? A->GetComponentsBoundingBox(true).GetCenter() : FVector::ZeroVector;
 }
 
-// 거리 가중 압력: 가까울수록 강하게
 static FORCEINLINE float ComputePressure(float EffIntensity, float Dist, float Radius)
 {
     if (Radius <= 1.f) return 0.f;
@@ -35,6 +38,11 @@ AFireActor::AFireActor()
     FirePsc = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("FirePSC"));
     FirePsc->SetupAttachment(Root);
     FirePsc->bAutoActivate = false;
+
+    FireLoopAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("FireLoopAudio"));
+    FireLoopAudio->SetupAttachment(Root);
+    FireLoopAudio->bAutoActivate = false;
+    FireLoopAudio->bStopWhenOwnerDestroyed = true;
 }
 
 void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
@@ -47,13 +55,6 @@ void AFireActor::InitFire(ARoomActor* InRoom, ECombustibleType InType)
     bInitialized = true;
 
     EffectiveIntensity = BaseIntensity;
-
-    UE_LOG(LogFireActor, Warning, TEXT("[Fire] InitFire Fire=%s Id=%s Room=%s Type=%d BaseInt=%.2f Loc=%s"),
-        *GetName(), *FireID.ToString(),
-        *GetNameSafe(LinkedRoom),
-        (int32)CombustibleType,
-        BaseIntensity,
-        *GetActorLocation().ToString());
 }
 
 void AFireActor::BeginPlay()
@@ -68,20 +69,22 @@ void AFireActor::BeginPlay()
         FirePsc->ActivateSystem(true);
     }
 
+    if (IsValid(FireLoopAudio) && HeavyFireLoopSound)
+    {
+        FireLoopAudio->SetSound(HeavyFireLoopSound);
+    }
+
     if (!bInitialized)
     {
-        UE_LOG(LogFireActor, Warning, TEXT("[Fire] BeginPlay: not initialized -> InitFire(SpawnRoom, SpawnType)"));
         InitFire(SpawnRoom, SpawnType);
     }
 
     if (!IsValid(LinkedRoom))
     {
-        UE_LOG(LogFireActor, Error, TEXT("[Fire] BeginPlay: LinkedRoom is None -> Destroy"));
         Destroy();
         return;
     }
 
-    // (중요) LinkedCombustible 누락이면 타겟에서 복구
     if (!IsValid(LinkedCombustible))
     {
         AActor* TargetActor = IgnitedTarget.Get();
@@ -93,9 +96,6 @@ void AFireActor::BeginPlay()
                 Found->SetOwningRoom(LinkedRoom);
                 Found->ActiveFire = this;
                 Found->bIsBurning = true;
-
-                UE_LOG(LogFireActor, Warning, TEXT("[Fire] LinkedCombustible recovered Owner=%s"),
-                    *GetNameSafe(TargetActor));
             }
         }
     }
@@ -105,7 +105,6 @@ void AFireActor::BeginPlay()
 
     LinkedRoom->RegisterFire(this);
 
-    // 초기 런타임 세팅
     UpdateRuntimeFromRoom(0.f);
 }
 
@@ -113,8 +112,8 @@ void AFireActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
 
-    // VFX는 항상 갱신
     UpdateVfx(DeltaSeconds);
+    UpdateAudio(DeltaSeconds);
 
     if (!bIsActive)
         return;
@@ -167,7 +166,6 @@ float AFireActor::GetCombustionScaleFromRoom() const
     if (!IsValid(LinkedRoom))
         return 1.f;
 
-    // RoomActor.h에 이미 제공: GetBackdraftCombustionScale01()
     const float S = LinkedRoom->GetBackdraftCombustionScale01();
     return FMath::Clamp(S, 0.f, 1.f);
 }
@@ -186,23 +184,20 @@ void AFireActor::UpdateRuntimeFromRoom(float /*DeltaSeconds*/)
         ExtinguishAlpha = LinkedCombustible->ExtinguishAlpha01;
     }
 
-    // Backdraft ready면 연소/확산/영향 모두 스케일 다운
     BackdraftScale01 = GetCombustionScaleFromRoom();
 
     FFireRuntimeTuning T;
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    // Spread
     const float SuppressByWater = FMath::Lerp(1.f, 0.3f, ExtinguishAlpha);
-    const float SuppressByBackdraft = FMath::Lerp(1.f, 0.2f, 1.f - BackdraftScale01); // Ready면 더 줄이기
+    const float SuppressByBackdraft = FMath::Lerp(1.f, 0.2f, 1.f - BackdraftScale01);
     CurrentSpreadRadius = T.SpreadRadius * SuppressByWater * SuppressByBackdraft;
     SpreadInterval = FMath::Max(0.05f, T.SpreadInterval);
 
-    // Effective intensity
     const float FuelMul = (0.35f + 0.65f * FuelRatio01);
     const float WaterMul = FMath::Lerp(1.f, 0.2f, ExtinguishAlpha);
-    const float BackdraftMul = FMath::Lerp(1.f, 0.05f, 1.f - BackdraftScale01); // Ready면 거의 최소
+    const float BackdraftMul = FMath::Lerp(1.f, 0.05f, 1.f - BackdraftScale01);
 
     EffectiveIntensity = BaseIntensity * FuelMul * WaterMul * BackdraftMul;
     EffectiveIntensity = FMath::Max(0.f, EffectiveIntensity);
@@ -213,9 +208,8 @@ void AFireActor::ApplyToOwnerCombustible()
     if (!IsValid(LinkedCombustible) || !IsValid(LinkedRoom))
         return;
 
-    float FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
+    const float FuelRatio01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
 
-    // Backdraft Ready 스케일
     const float BackdraftMul = GetCombustionScaleFromRoom();
     if (BackdraftMul <= KINDA_SMALL_NUMBER)
         return;
@@ -224,7 +218,6 @@ void AFireActor::ApplyToOwnerCombustible()
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    // 연료 소비 (BackdraftMul로 억제)
     const float Consume =
         T.ConsumePerSecond *
         EffectiveIntensity *
@@ -233,8 +226,6 @@ void AFireActor::ApplyToOwnerCombustible()
         BackdraftMul;
 
     LinkedCombustible->ConsumeFuel(Consume);
-
-    // 열 축적도 Ready면 거의 멈춤
     LinkedCombustible->AddHeat(EffectiveIntensity * 0.5f * BackdraftMul);
 }
 
@@ -252,7 +243,6 @@ void AFireActor::SubmitInfluenceToRoom()
     if (!LinkedRoom->GetRuntimeTuning(CombustibleType, EffectiveIntensity, FuelRatio01, T))
         return;
 
-    // 방 영향도 Ready면 급감
     LinkedRoom->AccumulateInfluence(CombustibleType, EffectiveIntensity, T.InfluenceScale * BackdraftMul);
 }
 
@@ -261,9 +251,8 @@ void AFireActor::SpreadPressureToNeighbors()
     if (!IsValid(LinkedRoom))
         return;
 
-    // Backdraft Ready면 확산 압력 거의 차단
     const float BackdraftMul = GetCombustionScaleFromRoom();
-    if (BackdraftMul <= 0.2f) // 완전 차단 기준은 취향
+    if (BackdraftMul <= 0.2f)
         return;
 
     TArray<UCombustibleComponent*> List;
@@ -271,8 +260,6 @@ void AFireActor::SpreadPressureToNeighbors()
 
     const FVector Origin = GetSpreadOrigin();
     const float Radius = CurrentSpreadRadius;
-
-    int32 Applied = 0;
 
     for (UCombustibleComponent* C : List)
     {
@@ -289,17 +276,13 @@ void AFireActor::SpreadPressureToNeighbors()
         if (CombustibleType == ECombustibleType::Oil)       Pressure *= 1.10f;
         if (CombustibleType == ECombustibleType::Explosive) Pressure *= 1.60f;
 
-        // Ready면 압력도 더 줄임
         Pressure *= BackdraftMul;
 
         if (Pressure <= 0.f)
             continue;
 
         C->AddIgnitionPressure(FireID, Pressure);
-        Applied++;
     }
-
-    UE_LOG(LogFireActor, VeryVerbose, TEXT("[Fire] SpreadEnd Applied=%d"), Applied);
 }
 
 FVector AFireActor::GetSpreadOrigin() const
@@ -320,6 +303,18 @@ void AFireActor::Extinguish()
 
     bIsActive = false;
 
+    // 3_Fire_Extinguish (OneShot) - FireActor당 1회만
+    if (bPlayExtinguishOneShot && !bPlayedExtinguishOneShot && FireExtinguishOneShotSound)
+    {
+        bPlayedExtinguishOneShot = true;
+        UGameplayStatics::PlaySoundAtLocation(this, FireExtinguishOneShotSound, GetActorLocation());
+    }
+
+    if (IsValid(FireLoopAudio) && FireLoopAudio->IsPlaying())
+    {
+        FireLoopAudio->FadeOut(FireLoopFadeOut, 0.f);
+    }
+
     if (IsValid(LinkedRoom))
         LinkedRoom->UnregisterFire(FireID);
 
@@ -329,7 +324,6 @@ void AFireActor::Extinguish()
         LinkedCombustible->ActiveFire = nullptr;
     }
 
-    // VFX는 Strength01로 내려가며 사라지게 하고, 생명주기 부여
     SetLifeSpan(20.0f);
 }
 
@@ -346,7 +340,6 @@ void AFireActor::UpdateVfx(float DeltaSeconds)
         if (IsValid(LinkedCombustible))
             Fuel01 = LinkedCombustible->Fuel.FuelRatio01_Cpp();
 
-        // Backdraft Ready면 VFX도 거의 꺼진 것처럼
         const float BackdraftMul = GetCombustionScaleFromRoom();
 
         const float Int01 = FMath::Clamp(EffectiveIntensity / FMath::Max(0.01f, BaseIntensity), 0.f, 2.f);
@@ -365,4 +358,31 @@ void AFireActor::UpdateVfx(float DeltaSeconds)
 
     Strength01 = FMath::FInterpTo(Strength01, TargetStrength01, DeltaSeconds, 1.0f);
     FirePsc->SetFloatParameter(TEXT("Strength01"), Strength01);
+}
+
+void AFireActor::UpdateAudio(float /*DeltaSeconds*/)
+{
+    if (!IsValid(FireLoopAudio) || !HeavyFireLoopSound)
+        return;
+
+    const bool bShouldPlay = bIsActive && (Strength01 > 0.03f);
+
+    if (bShouldPlay)
+    {
+        if (!FireLoopAudio->IsPlaying())
+        {
+            FireLoopAudio->Play();
+            FireLoopAudio->FadeIn(FireLoopFadeIn, 1.f);
+        }
+
+        const float Vol = FMath::Clamp(Strength01, 0.0f, 1.0f);
+        FireLoopAudio->SetVolumeMultiplier(Vol);
+    }
+    else
+    {
+        if (FireLoopAudio->IsPlaying())
+        {
+            FireLoopAudio->FadeOut(FireLoopFadeOut, 0.f);
+        }
+    }
 }
