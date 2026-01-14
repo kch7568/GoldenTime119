@@ -231,4 +231,18 @@ private:
     bool bTestFiring = false;
 
     bool bWaterVFXActive = false;
+
+    FVector PreviousLocalBarrelHandPos;  // 이전 프레임 손의 로컬 위치
+    float CurrentGrabRotationSum = 0.f;  // 현재 그랩 세션에서 누적된 회전량
+    bool bIsBarrelFirstTick = false;     // 노즐 그랩 첫 프레임 확인용
+
+    UPROPERTY(EditAnywhere, Category = "Hose|Barrel")
+    float RotationThresholdPerGrab = 90.f; // 한 번 잡았을 때 최대 회전 제한 (90도)
+
+    bool bModeSwappedInThisGrab = false; // 이번 그랩에서 이미 모드를 바꿨는지 체크
+
+    UPROPERTY(EditAnywhere, Category = "Hose|Barrel")
+    float BarrelSensitivity = 2.5f;            // 비비기 민감도
+
+    float RotationAtGrabStart = 0.f;  // 잡기 시작한 시점의 BarrelRotation 저장용
 };

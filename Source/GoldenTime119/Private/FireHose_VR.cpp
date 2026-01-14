@@ -50,17 +50,9 @@ AFireHose_VR::AFireHose_VR()
 void AFireHose_VR::BeginPlay()
 {
     Super::BeginPlay();
-
+    CurrentMode = EHoseMode_VR::Focused; // 기본 모드: 집중
+    BarrelRotation = 0.f;                // 각도 초기화
     UpdateWaterVFX();
-
-    if (bEnableKeyboardTest)
-    {
-        SetupKeyboardTest();
-    }
-
-    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] BeginPlay - Ready"));
-    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Keyboard Test: %s"), bEnableKeyboardTest ? TEXT("ON") : TEXT("OFF"));
-    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Controls: LMB=Fire, M=ToggleMode"));
 }
 
 void AFireHose_VR::SetupKeyboardTest()
@@ -211,9 +203,15 @@ void AFireHose_VR::OnBarrelGrabbed(USceneComponent* GrabbingController)
 {
     bIsGrabbedBarrel = true;
     GrabbingBarrelController = GrabbingController;
-    BarrelGrabStartRoll = GrabbingController->GetComponentRotation().Roll;
+    bIsBarrelFirstTick = true;
+    CurrentGrabRotationSum = 0.f;
+    bModeSwappedInThisGrab = false;
 
-    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Barrel Grabbed (Left Hand)"));
+    RotationAtGrabStart = BarrelRotation;
+
+    // 잡는 순간의 위치를 즉시 저장하여 첫 프레임의 튐 현상 방지
+    FVector CurrentHandLoc = GrabbingController->GetComponentLocation();
+    PreviousLocalBarrelHandPos = BarrelPivot->GetComponentTransform().InverseTransformPosition(CurrentHandLoc);
 }
 
 void AFireHose_VR::OnBarrelReleased()
@@ -221,7 +219,21 @@ void AFireHose_VR::OnBarrelReleased()
     bIsGrabbedBarrel = false;
     GrabbingBarrelController = nullptr;
 
-    UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Barrel Released"));
+    // 1. 만약 90도를 다 돌리지 못하고 놓았다면 (bModeSwappedInThisGrab이 false라면)
+    if (!bModeSwappedInThisGrab)
+    {
+        // 내부 값을 잡기 전 상태로 초기화 (예: 268도 -> 180도)
+        TargetBarrelRotation = RotationAtGrabStart;
+
+        UE_LOG(LogHoseVR, Warning, TEXT("임계값 미달! 이전 각도(%.1f)로 복구합니다."), RotationAtGrabStart);
+    }
+    else
+    {
+        // 2. 90도를 다 돌렸다면 현재 위치(90도의 배수 지점)에 고정
+        TargetBarrelRotation = BarrelRotation;
+    }
+
+    // UpdateBarrelRotation 함수가 TargetBarrelRotation까지 부드럽게 메쉬를 돌려줍니다.
 }
 
 void AFireHose_VR::UpdateVRLeverFromController()
@@ -243,25 +255,42 @@ void AFireHose_VR::UpdateVRLeverFromController()
 
 void AFireHose_VR::UpdateVRBarrelFromController()
 {
-    if (!IsValid(GrabbingBarrelController)) return;
+    if (!IsValid(GrabbingBarrelController) || !IsValid(BarrelPivot)) return;
 
-    // 컨트롤러의 현재 회전값 가져오기
-    FRotator CurrentRot = GrabbingBarrelController->GetComponentRotation();
+    FVector CurrentHandLoc = GrabbingBarrelController->GetComponentLocation();
+    FVector LocalHandPos = BarrelPivot->GetComponentTransform().InverseTransformPosition(CurrentHandLoc);
 
-    // 이전 프레임과의 Roll(손목 비틀기) 차이 계산
-    // BarrelGrabStartYaw 대신 BarrelGrabStartRoll을 사용하도록 헤더도 수정 필요
-    float CurrentRoll = CurrentRot.Roll;
-    float RollDelta = CurrentRoll - BarrelGrabStartRoll;
+    if (bIsBarrelFirstTick) {
+        PreviousLocalBarrelHandPos = LocalHandPos;
+        bIsBarrelFirstTick = false;
+        return;
+    }
 
-    // 회전 감도 조절 (0.5 ~ 1.5 사이에서 취향껏 조절)
-    float Sensitivity = 1.8f;
-    float NewRotation = BarrelRotation + (RollDelta * Sensitivity);
+    // 1. 이동 거리 계산 (Y축 차이의 절대값)
+    float MoveDistance = FMath::Abs(LocalHandPos.Y - PreviousLocalBarrelHandPos.Y);
+    float RotationToAdd = MoveDistance * BarrelSensitivity;
 
-    NewRotation = FMath::Clamp(NewRotation, 0.f, 180.f);
-    SetBarrelRotation(NewRotation);
+    // 2. 이번 그랩 세션에서 설정된 임계값(RotationThresholdPerGrab)까지만 회전
+    if (!bModeSwappedInThisGrab)
+    {
+        float Remaining = RotationThresholdPerGrab - CurrentGrabRotationSum; // 90.f
+        float ActualAdd = FMath::Min(RotationToAdd, Remaining);
 
-    // 다음 프레임을 위해 업데이트
-    BarrelGrabStartRoll = CurrentRoll;
+        CurrentGrabRotationSum += ActualAdd;
+        BarrelRotation += ActualAdd;
+
+        // 3. 임계값 도달 시 모드 변경
+        if (CurrentGrabRotationSum >= RotationThresholdPerGrab)
+        {
+            ToggleMode();
+            bModeSwappedInThisGrab = true;
+            UE_LOG(LogHoseVR, Warning, TEXT("모드 변경 임계값 도달!"));
+        }
+
+        UpdateBarrelVisual();
+    }
+
+    PreviousLocalBarrelHandPos = LocalHandPos;
 }
 
 void AFireHose_VR::SetLeverPull(float PullAmount)
@@ -421,17 +450,22 @@ void AFireHose_VR::UpdateWaterVFX()
 
 void AFireHose_VR::UpdateMode()
 {
-    EHoseMode_VR NewMode = (BarrelRotation < 90.f) ? EHoseMode_VR::Focused : EHoseMode_VR::Spray;
+    // 90도 단위로 몇 번째 구간에 있는지 계산합니다.
+    // 0~90도 = 0 (짝수), 90~180도 = 1 (홀수), 180~270도 = 2 (짝수) ...
+    int32 RotationStep = FMath::FloorToInt(BarrelRotation / 90.f);
+
+    // 짝수 구간은 Focused, 홀수 구간은 Spray로 결정
+    EHoseMode_VR NewMode = (RotationStep % 2 == 0) ? EHoseMode_VR::Focused : EHoseMode_VR::Spray;
 
     if (NewMode != CurrentMode)
     {
         CurrentMode = NewMode;
         UpdateWaterVFX();
 
-        UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode Changed: %s (Barrel: %.1f)"),
-            CurrentMode == EHoseMode_VR::Focused ? TEXT("Focused") : TEXT("Spray"), BarrelRotation);
+        UE_LOG(LogHoseVR, Warning, TEXT("[HoseVR] Mode Swapped to %s (Step: %d, Rotation: %.1f)"),
+            CurrentMode == EHoseMode_VR::Focused ? TEXT("Focused") : TEXT("Spray"),
+            RotationStep, BarrelRotation);
     }
-
 }
 
 FVector AFireHose_VR::GetNozzleLocation() const
