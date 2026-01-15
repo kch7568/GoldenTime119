@@ -73,12 +73,14 @@ void ARadioManager::TryPlayNextFromQueue()
 	if (Queue.Num() == 0)
 	{
 		bIsPlaying = false;
+		OnBusyChanged.Broadcast(false);
 		CurrentLine = nullptr;
 		PlayState = ERadioPlayState::Idle;
 		return;
 	}
 
 	bIsPlaying = true;
+	OnBusyChanged.Broadcast(true);
 	CurrentLine = Queue[0];
 	Queue.RemoveAt(0);
 

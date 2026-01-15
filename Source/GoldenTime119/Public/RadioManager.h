@@ -7,6 +7,7 @@
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioSubtitleBegin, const FRadioSubtitleInfomation&, Subtitle);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioSubtitleEnd, const FRadioSubtitleInfomation&, Subtitle);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioBusyChanged, bool, bBusy);
 
 UENUM(BlueprintType)
 enum class ERadioPlayState : uint8
@@ -44,6 +45,9 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Radio|Subtitle")
 	FOnRadioSubtitleEnd OnSubtitleEnd;
+
+	UPROPERTY(BlueprintAssignable, Category = "Radio|State")
+	FOnRadioBusyChanged OnBusyChanged;
 
 protected:
 	virtual void BeginPlay() override;
