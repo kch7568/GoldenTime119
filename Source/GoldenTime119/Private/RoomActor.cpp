@@ -104,7 +104,7 @@ void ARoomActor::BeginPlay()
     UpdateRoomGeometryFromBounds();
 
     // ===== NeutralPlane init =====
-    NP.NeutralPlaneZ = CeilingZ - MaxNeutralPlaneFromCeiling;
+    NP.NeutralPlaneZ = CeilingZ;
     NP.UpperSmoke01 = 0.f;
     NP.UpperTempC = 25.f;
     NP.Vent01 = 0.f;

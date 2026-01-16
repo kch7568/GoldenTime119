@@ -7,6 +7,7 @@
 #include "GameFramework/Actor.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "Camera/CameraComponent.h"
 #include "InputCoreTypes.h" // EKeys
 
 static FORCEINLINE float Clamp01(float X) { return FMath::Clamp(X, 0.f, 1.f); }
@@ -63,6 +64,26 @@ UVitalComponent::UVitalComponent()
 void UVitalComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    // 1. 카메라 컴포넌트 찾기
+    if (AActor* Owner = GetOwner())
+    {
+        PlayerCamera = Owner->FindComponentByClass<UCameraComponent>();
+    }
+
+    // 2. 동적 머티리얼 인스턴스 생성 및 카메라에 적용
+    if (SmokePostProcessMaterial && PlayerCamera)
+    {
+        SmokeMID = UMaterialInstanceDynamic::Create(SmokePostProcessMaterial, this);
+
+        // 카메라의 포스트 프로세스 설정에 머티리얼 추가
+        FWeightedBlendable SmokeBlendable;
+        SmokeBlendable.Weight = 1.0f;
+        SmokeBlendable.Object = SmokeMID;
+
+        PlayerCamera->PostProcessSettings.WeightedBlendables.Array.Add(SmokeBlendable);
+    }
+
     BroadcastIfChanged(true);
 }
 
@@ -111,11 +132,53 @@ void UVitalComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, F
         return;
     }
 
+    // 시야 효과는 부드러워야 하므로 UpdateInterval과 별개로 매 프레임 Tick에서 실행 추천
+    UpdateSmokeVisualEffect(DeltaTime);
+
     // 3) 정상 갱신
     StepVitals(Step);
     BroadcastIfChanged(false);
 }
+void UVitalComponent::UpdateSmokeVisualEffect(float DeltaTime)
+{
+    // 필수 데이터가 없거나 방 밖에 있으면 효과를 즉시 끕니다.
+    if (!SmokeMID || !PlayerCamera || !CurrentRoom)
+    {
+        if (SmokeMID) SmokeMID->SetScalarParameterValue(SmokeAlphaParamName, 0.f);
+        return;
+    }
 
+    const float EyeZ = PlayerCamera->GetComponentLocation().Z;
+    const float NPZ = CurrentRoom->GetNeutralPlaneZ();
+
+    float TargetAlpha = 0.f;
+
+    // 플레이어의 눈이 중성대(연기 경계선)보다 높을 때만 효과 적용
+    if (EyeZ > NPZ)
+    {
+        // 연기 속에 얼마나 깊게 들어갔는가? (가시거리 60cm 설정)
+        // 60cm 이상 깊이 들어가면 앞이 아예 안 보임
+        const float MaxBlindDepth = 60.0f;
+
+        float Depth = EyeZ - NPZ;
+        TargetAlpha = FMath::Clamp(Depth / MaxBlindDepth, 0.f, 1.f);
+
+        // 지수 보정: 연기 층에 살짝 발만 들였을 때는 덜 흐리게
+        TargetAlpha = FMath::Pow(TargetAlpha, 1.5f);
+
+        TargetAlpha *= 0.5f;
+    }
+
+    // 실제 머티리얼 파라미터 업데이트
+    SmokeMID->SetScalarParameterValue(SmokeAlphaParamName, TargetAlpha);
+
+    // 디버그 메시지 (수치 확인용)
+    if (GEngine)
+    {
+        FString Msg = FString::Printf(TEXT("Smoke Alpha: %.2f | Depth: %.1f cm"), TargetAlpha, (EyeZ - NPZ));
+        GEngine->AddOnScreenDebugMessage(1, DeltaTime, FColor::Cyan, Msg);
+    }
+}
 // ---------- Debug hotkeys (1/2/3 down, 7/8/9 up) ----------
 bool UVitalComponent::ProcessDebugHotkeys(float Dt)
 {

@@ -166,4 +166,25 @@ private:
     // ===== Broadcast threshold =====
     UPROPERTY(EditAnywhere, Category = "Vitals|Update")
     float Epsilon = 0.002f;
+
+protected:
+    // 에디터에서 할당할 포스트 프로세스 머티리얼 (부모 에셋)
+    UPROPERTY(EditAnywhere, Category = "Vitals|Effects")
+    TObjectPtr<UMaterialInterface> SmokePostProcessMaterial;
+
+    // 시야 효과 강도 제어 파라미터 이름
+    UPROPERTY(EditAnywhere, Category = "Vitals|Effects")
+    FName SmokeAlphaParamName = TEXT("SmokeAlpha");
+
+private:
+    // 런타임에 생성된 동적 머티리얼 인스턴스
+    UPROPERTY()
+    TObjectPtr<UMaterialInstanceDynamic> SmokeMID;
+
+    // 플레이어의 카메라 컴포넌트 참조
+    UPROPERTY()
+    TObjectPtr<class UCameraComponent> PlayerCamera;
+
+    // 시야 효과 업데이트 로직
+    void UpdateSmokeVisualEffect(float DeltaTime);
 };

@@ -477,4 +477,13 @@ private:
 
     // 환기 구멍으로 인한 압력 감소 처리
     void UpdateBackdraftPressure(float DeltaSeconds);
+
+public:
+    // 중성대 높이 반환
+    UFUNCTION(BlueprintPure, Category = "Room|Environment")
+    float GetNeutralPlaneZ() const { return NP.NeutralPlaneZ; }
+
+    // 천장 높이 반환
+    UFUNCTION(BlueprintPure, Category = "Room|Environment")
+    float GetCeilingZ() const { return CeilingZ; }
 };
