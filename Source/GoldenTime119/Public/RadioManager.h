@@ -1,23 +1,38 @@
-#pragma once
+Ôªø#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "RadioLineData.h"
+#include "TimerManager.h"
+
+#include "RadioSubtitleInfomation.h" // ‚úÖ Í≥µÏö© struct
+
 #include "RadioManager.generated.h"
 
+class UAudioComponent;
+class USoundBase;
+class USoundWaveProcedural;
+class URadioLineData;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioBusyChanged, bool, bBusy);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioSubtitleBegin, const FRadioSubtitleInfomation&, Subtitle);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioSubtitleEnd, const FRadioSubtitleInfomation&, Subtitle);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadioBusyChanged, bool, bBusy);
 
 UENUM(BlueprintType)
 enum class ERadioPlayState : uint8
 {
-	Idle       UMETA(DisplayName = "Idle"),
-	StartTone  UMETA(DisplayName = "StartTone"),
-	PreDelay   UMETA(DisplayName = "PreDelay"),
-	Voice      UMETA(DisplayName = "Voice"),
-	PostDelay  UMETA(DisplayName = "PostDelay"),
-	EndTone    UMETA(DisplayName = "EndTone")
+	Idle,
+
+	// Clip queue pipeline
+	StartTone,
+	PreDelay,
+	Voice,
+	PostDelay,
+	EndTone,
+
+	// Realtime pipeline
+	RealtimeStartTone,
+	RealtimeVoice,
+	RealtimeEndTone,
 };
 
 UCLASS()
@@ -27,86 +42,145 @@ class GOLDENTIME119_API ARadioManager : public AActor
 
 public:
 	ARadioManager();
-
-	// ø˘µÂ ƒ¡≈ÿΩ∫∆Æ ±‚π› ¿¸ø™ ¡¢±Ÿ
-	UFUNCTION(BlueprintCallable, Category = "Radio", meta = (WorldContext = "WorldContextObject"))
-	static ARadioManager* GetRadioManager(UObject* WorldContextObject);
-
-	// π´¿¸ ∂Û¿Œ ≈•ø° √ﬂ∞°
-	UFUNCTION(BlueprintCallable, Category = "Radio")
-	void EnqueueRadioLine(URadioLineData* LineData);
-
-	UFUNCTION(BlueprintCallable, Category = "Radio")
-	bool IsBusy() const { return bIsPlaying; }
-
-	// ¿⁄∏∑ ¿Ã∫•∆Æ
-	UPROPERTY(BlueprintAssignable, Category = "Radio|Subtitle")
-	FOnRadioSubtitleBegin OnSubtitleBegin;
-
-	UPROPERTY(BlueprintAssignable, Category = "Radio|Subtitle")
-	FOnRadioSubtitleEnd OnSubtitleEnd;
-
-	UPROPERTY(BlueprintAssignable, Category = "Radio|State")
-	FOnRadioBusyChanged OnBusyChanged;
-
-protected:
 	virtual void BeginPlay() override;
 
-	// ø¿µø¿ ƒƒ∆˜≥Õ∆ÆµÈ
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
-	class UAudioComponent* VoiceAudioComp;	// B2: ¿Ωº∫
+	UFUNCTION(BlueprintCallable, Category = "Radio")
+	static ARadioManager* GetRadioManager(UObject* WorldContextObject);
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
-	class UAudioComponent* LoopAudioComp;	// B1: ∑Á«¡ ≥Î¿Ã¡Ó
+	// =======================
+	// Existing: clip queue
+	// =======================
+	UFUNCTION(BlueprintCallable, Category = "Radio|Queue")
+	void EnqueueRadioLine(URadioLineData* LineData);
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
-	class UAudioComponent* SfxAudioComp;	// A/C: Ω√¿€/¡æ∑·¿Ω
+	UFUNCTION(BlueprintCallable, Category = "Radio|State")
+	bool IsBusy() const { return bIsPlaying || bRealtimeActive || CurrentLine != nullptr || Queue.Num() > 0; }
 
-	// ∞¯≈Î ªÁøÓµÂ
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Config")
-	USoundBase* StartToneSound;	// A
+	// =======================
+	// New: Realtime streaming
+	// =======================
+	UFUNCTION(BlueprintCallable, Category = "Radio|Realtime")
+	bool BeginRealtimeTransmission(const FRadioSubtitleInfomation& SubtitleInfo, bool bInterruptIfBusy);
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Config")
-	USoundBase* LoopNoiseSound;	// B1
+	UFUNCTION(BlueprintCallable, Category = "Radio|Realtime")
+	void AppendRealtimePcm16(const TArray<uint8>& Pcm16LE, int32 SampleRate, int32 NumChannels);
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Config")
-	USoundBase* EndToneSound;	// C
+	UFUNCTION(BlueprintCallable, Category = "Radio|Realtime")
+	void EndRealtimeTransmission(bool bFlushAndStop);
 
-	// ªÛ≈¬
+	UFUNCTION(BlueprintCallable, Category = "Radio|Realtime")
+	bool IsRealtimeTransmitting() const { return bRealtimeActive; }
+
+	// ===== Events =====
+	UPROPERTY(BlueprintAssignable, Category = "Radio|Events")
+	FOnRadioBusyChanged OnBusyChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "Radio|Events")
+	FOnRadioSubtitleBegin OnSubtitleBegin;
+
+	UPROPERTY(BlueprintAssignable, Category = "Radio|Events")
+	FOnRadioSubtitleEnd OnSubtitleEnd;
+
+	// ===== Audio assets =====
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
+	USoundBase* StartToneSound = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
+	USoundBase* EndToneSound = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Audio")
+	USoundBase* LoopNoiseSound = nullptr;
+
+	// ===== Realtime tuning =====
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Realtime|Tuning")
+	float RealtimeFlushIntervalSec = 0.02f; // 20ms
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Realtime|Tuning")
+	float RealtimePrebufferMs = 120.0f; // 80~150ms
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Realtime|Tuning")
+	int32 RealtimeDefaultSampleRate = 24000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Realtime|Tuning")
+	int32 RealtimeDefaultNumChannels = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio|Realtime|Tuning")
+	bool bRealtimeForceMono = true;
+
+private:
+	// ===== Components =====
+	UPROPERTY(VisibleAnywhere)
+	UAudioComponent* VoiceAudioComp = nullptr;
+
+	UPROPERTY(VisibleAnywhere)
+	UAudioComponent* LoopAudioComp = nullptr;
+
+	UPROPERTY(VisibleAnywhere)
+	UAudioComponent* SfxAudioComp = nullptr;
+
+	// ===== Clip queue state =====
 	UPROPERTY()
 	TArray<URadioLineData*> Queue;
 
 	UPROPERTY()
-	URadioLineData* CurrentLine;
+	URadioLineData* CurrentLine = nullptr;
 
-	UPROPERTY()
-	ERadioPlayState PlayState = ERadioPlayState::Idle;
-
-	UPROPERTY()
 	bool bIsPlaying = false;
+	ERadioPlayState PlayState = ERadioPlayState::Idle;
 
 	FTimerHandle StateTimerHandle;
 
-	// ≥ª∫Œ ¿Áª˝ »Â∏ß
 	void TryPlayNextFromQueue();
 	void PlayStartTone();
 	void OnStartToneFinished();
-
 	void PlayPreDelay();
 	void OnPreDelayFinished();
-
 	void PlayVoice();
 
-	// UAudioComponent::OnAudioFinished ø° ø¨∞·µ… «‘ºˆ (∆ƒ∂ÛπÃ≈Õ æ¯¿Ω)
 	UFUNCTION()
 	void OnVoiceFinished();
 
 	void PlayPostDelay();
 	void OnPostDelayFinished();
-
 	void PlayEndTone();
 	void OnEndToneFinished();
-
 	void FinishCurrentAndContinue();
 	void ClearStateTimer();
+
+	// ===== Realtime state =====
+	bool bRealtimeActive = false;
+	bool bRealtimeVoiceStarted = false;
+
+	FRadioSubtitleInfomation RealtimeSubtitle;
+
+	UPROPERTY()
+	USoundWaveProcedural* RealtimeWave = nullptr;
+
+	int32 RealtimeSampleRate = 0;
+	int32 RealtimeNumChannels = 0;
+
+	TArray<uint8> PendingPcm;
+
+	FTimerHandle RealtimeFlushTimerHandle;
+
+	void InterruptAllPlayback_Internal(bool bClearQueue);
+
+	void PlayRealtimeStartTone();
+	void OnRealtimeStartToneFinished();
+	void PlayRealtimeEndTone();
+	void OnRealtimeEndToneFinished();
+
+	USoundWaveProcedural* EnsureRealtimeWave(int32 SampleRate, int32 NumChannels);
+
+	void StartFlushTimerIfNeeded();
+	void StopFlushTimer();
+
+	// ‚úÖ Ìó§Îçî/CPP ÏãúÍ∑∏ÎãàÏ≤ò ÏùºÏπò
+	void FlushPendingPcm(bool bForceAll);
+
+	void StartRealtimeVoiceIfNeeded();
+	void StopRealtimeVoice_Internal();
+
+	int32 GetUseChannels(int32 InChannels) const;
+	int32 CalcPrebufferBytes(int32 SampleRate, int32 NumChannels) const;
 };

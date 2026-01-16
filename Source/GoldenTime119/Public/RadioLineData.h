@@ -1,46 +1,27 @@
-// RadioLineData.h
-#pragma once
+ï»¿#pragma once
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+
+#include "RadioSubtitleInfomation.h"   // âœ… ì—¬ê¸°ì„œ ê³µìš© struct ê°€ì ¸ì˜´
+
 #include "RadioLineData.generated.h"
 
-// === ¿©±â·Î USTRUCT¸¦ ¿Å±è ===
-USTRUCT(BlueprintType)
-struct FRadioSubtitleInfomation
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
-	FName SpeakerId;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
-	FText SpeakerName;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio", meta = (MultiLine = true))
-	FText SubtitleText;
-};
-
-// === DataAsset ===
 UCLASS(BlueprintType)
 class GOLDENTIME119_API URadioLineData : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
-	// ÀÌ ¹«Àü¿¡¼­ Àç»ýÇÒ À½¼º Å¬¸³ (B2)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
-	USoundBase* VoiceSound;
+	USoundBase* VoiceSound = nullptr;
 
-	// ¹«Àü ½ÃÀÛ Àü¿¡ ÁÙ Áö¿¬ (¼±ÅÃ»çÇ×)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
 	float PreDelay = 0.0f;
 
-	// À½¼º ³¡³­ µÚ, Á¾·áÀ½ Àç»ý Àü Àá±ñ ½°
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
 	float PostDelay = 0.2f;
 
-	// ÀÚ¸· Á¤º¸ (È­ÀÚ / ÅØ½ºÆ®)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Radio")
 	FRadioSubtitleInfomation Subtitle;
 };

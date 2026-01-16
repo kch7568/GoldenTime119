@@ -1,7 +1,7 @@
 ﻿#include "VoicePTTWhisperActor.h"
 
 #include "PTTAudioRecorderComponent.h"
-#include "WhisperSTTComponent.h"
+#include "RealtimeVoiceComponent.h"
 #include "RadioManager.h"
 
 #include "Components/SceneComponent.h"
@@ -9,9 +9,19 @@
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
 
-#include "Misc/Char.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+
+static uint32 ReadLE32(const uint8* P)
+{
+	return (uint32)P[0] | ((uint32)P[1] << 8) | ((uint32)P[2] << 16) | ((uint32)P[3] << 24);
+}
+static uint16 ReadLE16(const uint8* P)
+{
+	return (uint16)P[0] | ((uint16)P[1] << 8);
+}
 
 AVoicePTTWhisperActor::AVoicePTTWhisperActor()
 {
@@ -20,36 +30,35 @@ AVoicePTTWhisperActor::AVoicePTTWhisperActor()
 	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(SceneRoot);
 
-	// CDO 단계에서 기본 컴포넌트 생성
 	PTT = CreateDefaultSubobject<UPTTAudioRecorderComponent>(TEXT("PTT"));
-	Whisper = CreateDefaultSubobject<UWhisperSTTComponent>(TEXT("Whisper"));
+	Realtime = CreateDefaultSubobject<URealtimeVoiceComponent>(TEXT("Realtime"));
 }
 
 void AVoicePTTWhisperActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// ✅ BP 인스턴스에서 포인터가 끊겨도 여기서 복구
 	EnsureComponentsBound();
 
-	if (!PTT || !Whisper)
+	if (!PTT || !Realtime)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] Components missing even after EnsureComponentsBound. PTT=%s Whisper=%s"),
-			*GetNameSafe(PTT), *GetNameSafe(Whisper));
+		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] Missing components. PTT=%s Realtime=%s"),
+			*GetNameSafe(PTT), *GetNameSafe(Realtime));
 		return;
 	}
 
-	// 이벤트 바인딩 (중복 바인딩 방지: AddUniqueDynamic 사용)
 	PTT->OnWavReady.AddUniqueDynamic(this, &AVoicePTTWhisperActor::HandleWavReady);
-	Whisper->OnFinished.AddUniqueDynamic(this, &AVoicePTTWhisperActor::HandleWhisperFinished);
 
+	// Radio busy
 	RadioManager = nullptr;
 	if (ARadioManager* RM = ARadioManager::GetRadioManager(this))
 	{
 		RadioManager = RM;
-		// 네 RadioManager에 OnBusyChanged가 있다고 가정
-		RadioManager->OnBusyChanged.AddUniqueDynamic(this, &AVoicePTTWhisperActor::HandleRadioBusyChanged);
+		RM->OnBusyChanged.AddUniqueDynamic(this, &AVoicePTTWhisperActor::HandleRadioBusyChanged);
 	}
+
+	// Realtime 연결(원하면 외부에서 수동 Connect해도 됨)
+	Realtime->Connect();
 }
 
 void AVoicePTTWhisperActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -65,42 +74,45 @@ void AVoicePTTWhisperActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AVoicePTTWhisperActor::EnsureComponentsBound()
 {
-	// 1) 이미 정상
-	if (PTT && Whisper)
+	if (PTT && Realtime)
 		return;
 
-	// 2) 인스턴스에 실제로 붙어있는 컴포넌트를 찾아서 “C++ 포인터 슬롯”을 복구
-	//    (BP가 꼬였을 때도 이 방법이면 무조건 살릴 수 있음)
 	if (!PTT)
 	{
-		if (UPTTAudioRecorderComponent* FoundPTT = FindComponentByClass<UPTTAudioRecorderComponent>())
+		if (UPTTAudioRecorderComponent* Found = FindComponentByClass<UPTTAudioRecorderComponent>())
 		{
-			PTT = FoundPTT;
+			PTT = Found;
 		}
 	}
 
-	if (!Whisper)
+	if (!Realtime)
 	{
-		if (UWhisperSTTComponent* FoundWhisper = FindComponentByClass<UWhisperSTTComponent>())
+		if (URealtimeVoiceComponent* Found = FindComponentByClass<URealtimeVoiceComponent>())
 		{
-			Whisper = FoundWhisper;
+			Realtime = Found;
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] EnsureComponentsBound: this=%s PTT=%s Whisper=%s"),
-		*GetNameSafe(this), *GetNameSafe(PTT), *GetNameSafe(Whisper));
+	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] EnsureComponentsBound: this=%s PTT=%s Realtime=%s"),
+		*GetNameSafe(this), *GetNameSafe(PTT), *GetNameSafe(Realtime));
+}
+
+void AVoicePTTWhisperActor::UpdateRealtimeGameState(const FString& ContextTextOrJson)
+{
+	EnsureComponentsBound();
+	if (Realtime)
+	{
+		Realtime->UpdateDynamicContext(ContextTextOrJson);
+	}
 }
 
 void AVoicePTTWhisperActor::StartPTT()
 {
-	// ✅ 호출될 때도 마지막 안전장치
 	EnsureComponentsBound();
 
-	// 이미 켜져있으면 무시
 	if (bPTTActive)
 		return;
 
-	// 라디오 채널이 이미 사용중이면 시작 차단
 	if (bBlockPTTWhenRadioBusy)
 	{
 		ARadioManager* RM = RadioManager.Get();
@@ -115,6 +127,12 @@ void AVoicePTTWhisperActor::StartPTT()
 			PlayBusyWarning();
 			return;
 		}
+	}
+
+	// Realtime: 새 턴 시작(입력/출력 버퍼 정리)
+	if (Realtime && Realtime->IsConnected())
+	{
+		Realtime->BeginUserTurn(true, true);
 	}
 
 	PlayPTTStartSfx();
@@ -161,31 +179,27 @@ void AVoicePTTWhisperActor::StartCaptureInternal()
 	}
 
 	bCaptureStarted = true;
-
 	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] Calling PTT->StartPTT"));
 	PTT->StartPTT();
 }
 
 void AVoicePTTWhisperActor::StopPTT()
 {
-	// ✅ 호출될 때도 마지막 안전장치
 	EnsureComponentsBound();
 
 	const bool bWasActive = bPTTActive;
 	bPTTActive = false;
 
-	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] StopPTT: this=%s WasActive=%d PTT=%s class=%s"),
+	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] StopPTT: this=%s WasActive=%d PTT=%s"),
 		*GetNameSafe(this),
 		bWasActive ? 1 : 0,
-		*GetNameSafe(PTT),
-		PTT ? *PTT->GetClass()->GetName() : TEXT("null"));
+		*GetNameSafe(PTT));
 
 	if (UWorld* W = GetWorld())
 	{
 		W->GetTimerManager().ClearTimer(StartCaptureTimer);
 	}
 
-	// 여기서 무조건 Stop 시도
 	if (PTT)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] Calling PTT->StopPTTAndSave"));
@@ -193,7 +207,7 @@ void AVoicePTTWhisperActor::StopPTT()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] StopPTT: PTT is null, cannot StopPTTAndSave"));
+		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] StopPTT: PTT is null"));
 	}
 
 	StopStaticLoop();
@@ -213,55 +227,138 @@ void AVoicePTTWhisperActor::HandleWavReady(bool bSuccess, const FString& WavPath
 {
 	if (!bSuccess)
 	{
-		if (bBroadcastRawTextAlways)
-		{
-			OnCommandDetected.Broadcast(EGTVoiceCommand::None, WavPathOrError, 0.0f);
-		}
+		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] WAV failed: %s"), *WavPathOrError);
 		return;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] HandleWavReady success. WavPath=%s"), *WavPathOrError);
 
 	EnsureComponentsBound();
 
-	if (!Whisper)
+	if (!Realtime || !Realtime->IsConnected())
 	{
-		if (bBroadcastRawTextAlways)
-		{
-			OnCommandDetected.Broadcast(EGTVoiceCommand::None, TEXT("Whisper component missing"), 0.0f);
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[VoicePTT] Realtime not connected. wav=%s"), *WavPathOrError);
 		return;
 	}
 
-	Whisper->RunWhisperOnWav(WavPathOrError);
+	TArray<uint8> Pcm16Bytes;
+	int32 SampleRate = 0;
+	int32 NumChannels = 0;
+	FString Err;
+
+	if (!ExtractPcm16FromWavFile(WavPathOrError, Pcm16Bytes, SampleRate, NumChannels, Err))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[VoicePTT] WAV parse failed: %s"), *Err);
+		return;
+	}
+
+	// (중요) session.update 입력 포맷과 SampleRate가 같아야 함.
+	// 여기서는 RealtimeVoiceComponent 기본 InputSampleRate=48000로 맞춰둠.
+
+	Realtime->AppendInputAudioPCM16(Pcm16Bytes);
+	Realtime->CommitInputAudio(); // VAD 꺼져있으면 수동 :contentReference[oaicite:15]{index=15}
+	Realtime->CreateResponse();   // VAD 꺼져있으면 수동 :contentReference[oaicite:16]{index=16}
+
+	UE_LOG(LogTemp, Log, TEXT("[VoicePTT] Sent PCM16 to Realtime. bytes=%d sr=%d ch=%d"),
+		Pcm16Bytes.Num(), SampleRate, NumChannels);
 }
 
-void AVoicePTTWhisperActor::HandleWhisperFinished(bool bSuccess, const FString& TextOrError)
+bool AVoicePTTWhisperActor::ExtractPcm16FromWavFile(
+	const FString& WavPath,
+	TArray<uint8>& OutPcm16Bytes,
+	int32& OutSampleRate,
+	int32& OutNumChannels,
+	FString& OutError)
 {
-	if (!bSuccess)
+	TArray<uint8> Bytes;
+	if (!FFileHelper::LoadFileToArray(Bytes, *WavPath))
 	{
-		if (bBroadcastRawTextAlways)
+		OutError = FString::Printf(TEXT("Failed to read wav: %s"), *WavPath);
+		return false;
+	}
+
+	if (Bytes.Num() < 44)
+	{
+		OutError = TEXT("WAV too small");
+		return false;
+	}
+
+	// RIFF header
+	if (!(Bytes[0] == 'R' && Bytes[1] == 'I' && Bytes[2] == 'F' && Bytes[3] == 'F' &&
+		Bytes[8] == 'W' && Bytes[9] == 'A' && Bytes[10] == 'V' && Bytes[11] == 'E'))
+	{
+		OutError = TEXT("Not a RIFF/WAVE");
+		return false;
+	}
+
+	int32 Cursor = 12;
+
+	uint16 AudioFormat = 0;
+	uint16 NumChannels = 0;
+	uint32 SampleRate = 0;
+	uint16 BitsPerSample = 0;
+
+	int32 DataOffset = -1;
+	int32 DataSize = 0;
+
+	while (Cursor + 8 <= Bytes.Num())
+	{
+		const uint8* P = Bytes.GetData() + Cursor;
+		const uint32 ChunkId = ReadLE32(P);
+		const uint32 ChunkSize = ReadLE32(P + 4);
+		Cursor += 8;
+
+		if (Cursor + (int32)ChunkSize > Bytes.Num())
+			break;
+
+		// 'fmt '
+		if (ChunkId == 0x20746D66)
 		{
-			OnCommandDetected.Broadcast(EGTVoiceCommand::None, TextOrError, 0.0f);
+			const uint8* F = Bytes.GetData() + Cursor;
+			if (ChunkSize < 16)
+			{
+				OutError = TEXT("fmt chunk too small");
+				return false;
+			}
+			AudioFormat = ReadLE16(F + 0);
+			NumChannels = ReadLE16(F + 2);
+			SampleRate = ReadLE32(F + 4);
+			BitsPerSample = ReadLE16(F + 14);
 		}
-		return;
+		// 'data'
+		else if (ChunkId == 0x61746164)
+		{
+			DataOffset = Cursor;
+			DataSize = (int32)ChunkSize;
+			break;
+		}
+
+		// chunk alignment: pad to even
+		Cursor += (int32)ChunkSize;
+		if (Cursor & 1) Cursor++;
 	}
 
-	FString Raw = TextOrError;
-	Raw.TrimStartAndEndInline();
-
-	const FString N = NormalizeKo(Raw);
-
-	EGTVoiceCommand Cmd = EGTVoiceCommand::None;
-	float Confidence = 0.0f;
-	ScoreCommand_TwoOnly(N, Cmd, Confidence);
-
-	if (Cmd == EGTVoiceCommand::None || Confidence < MinConfidenceToAccept)
+	if (DataOffset < 0 || DataSize <= 0)
 	{
-		OnCommandDetected.Broadcast(EGTVoiceCommand::None, Raw, Confidence);
-		return;
+		OutError = TEXT("No data chunk found");
+		return false;
 	}
 
-	OnCommandDetected.Broadcast(Cmd, Raw, Confidence);
+	if (AudioFormat != 1 || BitsPerSample != 16)
+	{
+		OutError = FString::Printf(TEXT("Unsupported WAV format. AudioFormat=%d Bits=%d (need PCM16)"), AudioFormat, BitsPerSample);
+		return false;
+	}
+
+	OutSampleRate = (int32)SampleRate;
+	OutNumChannels = (int32)NumChannels;
+
+	// Realtime에 보내는 건 “PCM16 raw bytes” (WAV 헤더 제외)
+	OutPcm16Bytes.Reset();
+	OutPcm16Bytes.Append(Bytes.GetData() + DataOffset, DataSize);
+
+	// 만약 스테레오라면 여기서 mono downmix가 필요하지만,
+	// 당신 PTT는 이미 mono로 저장 중(DesiredNumChannels=1)이라 그대로 가정.
+
+	return true;
 }
 
 // ------------------- SFX -------------------
@@ -307,188 +404,4 @@ void AVoicePTTWhisperActor::PlayBusyWarning()
 {
 	if (!SfxChannelBusyWarning) return;
 	UGameplayStatics::PlaySound2D(this, SfxChannelBusyWarning);
-}
-
-// ------------------- Normalize / Extract / Score -------------------
-
-FString AVoicePTTWhisperActor::NormalizeKo(const FString& In)
-{
-	FString S = In;
-	S.TrimStartAndEndInline();
-	S = S.ToLower();
-
-	for (int32 i = 0; i < S.Len(); ++i)
-	{
-		const TCHAR Ch = S[i];
-		const uint32 Code = (uint32)Ch;
-		const bool bHangul = (Code >= 0xAC00u && Code <= 0xD7A3u);
-		if (FChar::IsAlnum(Ch) || Ch == TEXT(' ') || bHangul)
-			continue;
-		S[i] = TEXT(' ');
-	}
-
-	while (S.Contains(TEXT("  ")))
-		S = S.Replace(TEXT("  "), TEXT(" "));
-
-	// === 한글 리터럴 제거(ICE 우회) ===
-	S = S.Replace(TEXT("\uD37C\uC13C\uD2B8"), TEXT("%"));              // 퍼센트
-	S = S.Replace(TEXT("\uD504\uB85C"), TEXT("%"));                    // 프로
-	S = S.Replace(TEXT("\uD37C"), TEXT("%"));                          // 퍼
-
-	S = S.Replace(TEXT("\uC9C4\uC555 \uC728"), TEXT("\uC9C4\uC555\uB960")); // 진압 율 -> 진압률
-	S = S.Replace(TEXT("\uC9C4\uC555\uC728"), TEXT("\uC9C4\uC555\uB960"));  // 진압율  -> 진압률
-
-	S = S.Replace(TEXT("\uD654\uC7AC\uC0C1\uD669"), TEXT("\uD654\uC7AC \uC0C1\uD669")); // 화재상황 -> 화재 상황
-	S = S.Replace(TEXT("\uC694 \uAD6C\uC870\uC790"), TEXT("\uC694\uAD6C\uC870\uC790")); // 요 구조자 -> 요구조자
-
-	return S;
-}
-
-bool AVoicePTTWhisperActor::TryExtractPercent(const FString& S, float& OutPercent)
-{
-	const int32 PercentPos = S.Find(TEXT("%"));
-	if (PercentPos != INDEX_NONE)
-	{
-		int32 Start = PercentPos - 1;
-		while (Start >= 0 && FChar::IsDigit(S[Start])) --Start;
-		++Start;
-
-		if (Start < PercentPos)
-		{
-			const FString NumStr = S.Mid(Start, PercentPos - Start);
-			OutPercent = FCString::Atof(*NumStr);
-			return (OutPercent >= 0.f && OutPercent <= 100.f);
-		}
-	}
-
-	const int32 KeyPos = S.Find(TEXT("\uC9C4\uC555\uB960")); // 진압률
-	if (KeyPos != INDEX_NONE)
-	{
-		for (int32 i = KeyPos; i < S.Len(); ++i)
-		{
-			if (FChar::IsDigit(S[i]))
-			{
-				int32 j = i;
-				while (j < S.Len() && FChar::IsDigit(S[j])) ++j;
-				const FString NumStr = S.Mid(i, j - i);
-				OutPercent = FCString::Atof(*NumStr);
-				return (OutPercent >= 0.f && OutPercent <= 100.f);
-			}
-		}
-	}
-
-	return false;
-}
-
-bool AVoicePTTWhisperActor::TryExtractCount(const FString& S, int32& OutCount)
-{
-	const int32 NamePos = S.Find(TEXT("\uBA85")); // 명
-	if (NamePos != INDEX_NONE)
-	{
-		int32 Start = NamePos - 1;
-		while (Start >= 0 && FChar::IsDigit(S[Start])) --Start;
-		++Start;
-
-		if (Start < NamePos)
-		{
-			const FString NumStr = S.Mid(Start, NamePos - Start);
-			OutCount = FCString::Atoi(*NumStr);
-			return (OutCount >= 0 && OutCount <= 99);
-		}
-	}
-
-	static const TCHAR* Keys[] = {
-		TEXT("\uC694\uAD6C\uC870\uC790"), // 요구조자
-		TEXT("\uC0AC\uB78C"),             // 사람
-		TEXT("\uC778\uC6D0")              // 인원
-	};
-
-	for (const TCHAR* K : Keys)
-	{
-		const int32 KeyPos = S.Find(K);
-		if (KeyPos == INDEX_NONE) continue;
-
-		for (int32 i = KeyPos; i < S.Len(); ++i)
-		{
-			if (FChar::IsDigit(S[i]))
-			{
-				int32 j = i;
-				while (j < S.Len() && FChar::IsDigit(S[j])) ++j;
-				const FString NumStr = S.Mid(i, j - i);
-				OutCount = FCString::Atoi(*NumStr);
-				return (OutCount >= 0 && OutCount <= 99);
-			}
-		}
-	}
-
-	return false;
-}
-
-void AVoicePTTWhisperActor::ScoreCommand_TwoOnly(
-	const FString& Normalized,
-	EGTVoiceCommand& OutCmd,
-	float& OutConfidence
-)
-{
-	const FString& S = Normalized;
-
-	float ScoreFire = 0.f;
-	float ScoreVictim = 0.f;
-
-	// === 화재 상황 + 진압률 ===
-	const bool bFire = S.Contains(TEXT("\uD654\uC7AC")); // 화재
-	const bool bSituation =
-		S.Contains(TEXT("\uC0C1\uD669")) ||  // 상황
-		S.Contains(TEXT("\uD604\uD669")) ||  // 현황
-		S.Contains(TEXT("\uC0C1\uD0DC"));    // 상태
-
-	const bool bSupp =
-		S.Contains(TEXT("\uC9C4\uC555\uB960")) || // 진압률
-		S.Contains(TEXT("%")) ||
-		S.Contains(TEXT("\uC9C4\uC555"));        // 진압
-
-	if (bFire) ScoreFire += 0.40f;
-	if (bSituation) ScoreFire += 0.20f;
-	if (bSupp) ScoreFire += 0.30f;
-
-	float Pct = 0.f;
-	if (TryExtractPercent(S, Pct)) ScoreFire += 0.20f;
-
-	// === 요구조자 + 사람 ===
-	const bool bVictim =
-		S.Contains(TEXT("\uC694\uAD6C\uC870\uC790")) || // 요구조자
-		S.Contains(TEXT("\uAD6C\uC870")) ||             // 구조
-		S.Contains(TEXT("\uC778\uBA85"));               // 인명
-
-	const bool bPeople =
-		S.Contains(TEXT("\uC0AC\uB78C")) || // 사람
-		S.Contains(TEXT("\uC778\uC6D0")) || // 인원
-		S.Contains(TEXT("\uBA85"));         // 명
-
-	if (bVictim) ScoreVictim += 0.45f;
-	if (bPeople) ScoreVictim += 0.35f;
-
-	int32 Cnt = 0;
-	if (TryExtractCount(S, Cnt)) ScoreVictim += 0.25f;
-
-	ScoreFire = FMath::Clamp(ScoreFire, 0.f, 1.f);
-	ScoreVictim = FMath::Clamp(ScoreVictim, 0.f, 1.f);
-
-	if (ScoreFire <= 0.f && ScoreVictim <= 0.f)
-	{
-		OutCmd = EGTVoiceCommand::None;
-		OutConfidence = 0.f;
-		return;
-	}
-
-	if (ScoreFire >= ScoreVictim)
-	{
-		OutCmd = (ScoreFire >= 0.50f) ? EGTVoiceCommand::FireStatusAndSuppression : EGTVoiceCommand::None;
-		OutConfidence = ScoreFire;
-	}
-	else
-	{
-		OutCmd = (ScoreVictim >= 0.50f) ? EGTVoiceCommand::VictimAndPeople : EGTVoiceCommand::None;
-		OutConfidence = ScoreVictim;
-	}
 }
