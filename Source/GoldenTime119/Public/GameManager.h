@@ -3,261 +3,64 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "CombustibleComponent.h"
+#include "MissionObjective.h"
 #include "GameManager.generated.h"
 
-// Forward declarations
-class UMissionObjective;
+// 전방 선언
 class ARoomActor;
 class AFireActor;
-class AGasTankActor;
-class ADoorActor;
+class APawn;
+class AActor;
+class UVitalComponent;
+class UCombustibleComponent;
 
-// 게임 전체 상태
+// 게임 상태
 UENUM(BlueprintType)
 enum class EGameState : uint8
 {
-    MainMenu            UMETA(DisplayName = "메인 메뉴"),
-    ChapterSelect       UMETA(DisplayName = "챕터 선택"),
-    Loading             UMETA(DisplayName = "로딩"),
-    ChapterIntro        UMETA(DisplayName = "챕터 인트로"),
-    Gameplay            UMETA(DisplayName = "게임플레이"),
-    Paused              UMETA(DisplayName = "일시정지"),
-    MissionComplete     UMETA(DisplayName = "미션 완료"),
-    MissionFailed       UMETA(DisplayName = "미션 실패"),
-    ChapterComplete     UMETA(DisplayName = "챕터 완료"),
-    GameOver            UMETA(DisplayName = "게임 오버")
+    NotStarted      UMETA(DisplayName = "시작 전"),
+    Starting        UMETA(DisplayName = "시작 중"),
+    InProgress      UMETA(DisplayName = "진행 중"),
+    Paused          UMETA(DisplayName = "일시정지"),
+    MissionComplete UMETA(DisplayName = "미션 완료"),
+    MissionFailed   UMETA(DisplayName = "미션 실패"),
+    Ended           UMETA(DisplayName = "종료")
 };
 
-// 챕터 정보
+// 챕터 정의
 UENUM(BlueprintType)
-enum class EChapterID : uint8
+enum class EChapter : uint8
 {
-    None                UMETA(DisplayName = "None"),
-    Chapter1            UMETA(DisplayName = "Chapter 1"),
-    Chapter2            UMETA(DisplayName = "Chapter 2"),
-    Chapter3            UMETA(DisplayName = "Chapter 3"),
-    Tutorial            UMETA(DisplayName = "Tutorial")
+    Chapter1        UMETA(DisplayName = "챕터 1 - 기본 화재 진압"),
+    Chapter2        UMETA(DisplayName = "챕터 2 - TBD"),
+    Chapter3        UMETA(DisplayName = "챕터 3 - TBD"),
+    Custom          UMETA(DisplayName = "커스텀")
 };
 
-// 화재 시나리오 타입
-UENUM(BlueprintType)
-enum class EFireScenarioType : uint8
-{
-    Manual              UMETA(DisplayName = "수동 (디자이너가 배치)"),
-    Scripted            UMETA(DisplayName = "스크립트 (타이머 기반)"),
-    Random              UMETA(DisplayName = "랜덤 (동적 생성)"),
-    Progressive         UMETA(DisplayName = "점진적 (단계별 확산)")
-};
+// 게임 상태 변경 델리게이트
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGameStateChanged,
+    EGameState, OldState, EGameState, NewState);
 
-// 화재 발생 이벤트 데이터
-USTRUCT(BlueprintType)
-struct FFireSpawnEvent
-{
-    GENERATED_BODY()
+// 미션 이벤트 델리게이트
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMissionStarted, EChapter, Chapter);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMissionCompleted, EChapter, Chapter, int32, TotalScore);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMissionFailed, EChapter, Chapter, FString, Reason);
 
-    // 발생 시간 (챕터 시작 후 초)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    float TriggerTime = 0.f;
+// 목표 이벤트 델리게이트
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnObjectiveCompleted, UMissionObjective*, Objective);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnObjectiveFailed, UMissionObjective*, Objective);
 
-    // 발생 위치 (Room 또는 Actor)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    class ARoomActor* TargetRoom;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    AActor* TargetActor;
-
-    // 화재 타입
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    ECombustibleType FireType = ECombustibleType::Normal;
-
-    // 초기 강도
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    float InitialIntensity = 1.0f;
-
-    // 트리거 조건 (옵션)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    FString TriggerCondition;
-
-    // 이벤트 ID
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    FString EventID;
-
-    // 이미 발생했는지 여부
-    UPROPERTY(BlueprintReadOnly)
-    bool bHasTriggered = false;
-
-    FFireSpawnEvent()
-    {
-        EventID = FGuid::NewGuid().ToString();
-        TargetRoom = nullptr;
-        TargetActor = nullptr;
-    }
-};
-
-// NPC 구조 데이터
-USTRUCT(BlueprintType)
-struct FNPCRescueData
-{
-    GENERATED_BODY()
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    FString NPCID;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    FText NPCName;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    AActor* NPCActor;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    class ARoomActor* InitialRoom;
-
-    UPROPERTY(BlueprintReadOnly)
-    bool bIsRescued = false;
-
-    UPROPERTY(BlueprintReadOnly)
-    bool bIsDead = false;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    float MaxSurvivalTime = 300.f; // 5분
-
-    UPROPERTY(BlueprintReadOnly)
-    float TimeInDanger = 0.f;
-
-    FNPCRescueData()
-    {
-        NPCID = FGuid::NewGuid().ToString();
-        NPCActor = nullptr;
-        InitialRoom = nullptr;
-    }
-};
-
-// 챕터 데이터
-USTRUCT(BlueprintType)
-struct FChapterData
-{
-    GENERATED_BODY()
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Basic")
-    EChapterID ChapterID = EChapterID::Chapter1;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Basic")
-    FText ChapterTitle;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Basic")
-    FText ChapterDescription;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Basic")
-    FName LevelName;
-
-    // 인트로/아웃트로
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Narrative")
-    FText IntroText;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Narrative")
-    FText SuccessOutroText;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Narrative")
-    FText FailureOutroText;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Narrative")
-    float IntroDuration = 5.f;
-
-    // 화재 시나리오
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Fire")
-    EFireScenarioType ScenarioType = EFireScenarioType::Scripted;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Fire")
-    TArray<FFireSpawnEvent> FireEvents;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Fire")
-    int32 MaxSimultaneousFires = 5;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Fire")
-    bool bAllowFireSpread = true;
-
-    // NPC 구조
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Rescue")
-    TArray<FNPCRescueData> NPCsToRescue;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Rescue")
-    int32 MinNPCRescueRequired = 0;
-
-    // 미션
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Mission")
-    TArray<UMissionObjective*> ChapterObjectives;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Mission")
-    float TimeLimit = 600.f; // 10분
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chapter|Mission")
-    int32 TargetScore = 1000;
-
-    // 진행 상황
-    UPROPERTY(BlueprintReadOnly, Category = "Chapter|Progress")
-    bool bIsUnlocked = false;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Chapter|Progress")
-    bool bIsCompleted = false;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Chapter|Progress")
-    int32 BestScore = 0;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Chapter|Progress")
-    float BestTime = 0.f;
-};
-
-// 게임 통계
-USTRUCT(BlueprintType)
-struct FGameStatistics
-{
-    GENERATED_BODY()
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalFiresExtinguished = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalNPCsRescued = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalBackdraftsTriggered = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalGasTanksExploded = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalDoorsBreached = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 TotalVentHolesCreated = 0;
-
-    UPROPERTY(BlueprintReadOnly)
-    float TotalWaterUsed = 0.f;
-
-    UPROPERTY(BlueprintReadOnly)
-    float TotalPlayTime = 0.f;
-
-    UPROPERTY(BlueprintReadOnly)
-    int32 DeathCount = 0;
-};
-
-// 델리게이트
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGameStateChanged, EGameState, NewState);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChapterStarted, EChapterID, ChapterID);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChapterCompleted, EChapterID, ChapterID, bool, bSuccess);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCRescued, FString, NPCID, FText, NPCName);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCDied, FString, NPCID, FText, NPCName);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnFireEventTriggered, FString, EventID);
+// 플레이어 바이탈 경고 델리게이트
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnVitalWarning, FString, VitalType, float, Value01);
 
 /**
- * 게임 전체를 총괄하는 매니저
- * - 챕터 관리
- * - 화재 시나리오 관리
- * - NPC 구조 시스템
- * - 통계 및 진행 상황
+ * VR 소방안전 게임 매니저
+ * - 미션 관리
+ * - 화재 시스템 제어
+ * - 게임 상태 관리
+ * - 이벤트 중계
  */
-UCLASS()
+UCLASS(Blueprintable, BlueprintType)
 class AGameManager : public AActor
 {
     GENERATED_BODY()
@@ -267,223 +70,269 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+    virtual void Tick(float DeltaTime) override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
-    virtual void Tick(float DeltaTime) override;
-
-    // ============================ 싱글톤 접근 ============================
-
-    UFUNCTION(BlueprintPure, Category = "Game", meta = (WorldContext = "WorldContextObject"))
-    static AGameManager* GetGameManager(const UObject* WorldContextObject);
-
     // ============================ 게임 상태 ============================
 
-    UPROPERTY(BlueprintReadOnly, Category = "Game|State")
-    EGameState CurrentGameState = EGameState::MainMenu;
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|State")
+    EGameState CurrentGameState = EGameState::NotStarted;
 
-    UPROPERTY(BlueprintReadOnly, Category = "Game|State")
-    EChapterID CurrentChapterID = EChapterID::None;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|State")
+    EChapter CurrentChapter = EChapter::Chapter1;
 
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnGameStateChanged OnGameStateChanged;
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|State")
+    float GameStartTime = 0.f;
 
-    UFUNCTION(BlueprintCallable, Category = "Game|State")
-    void ChangeGameState(EGameState NewState);
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|State")
+    float GameEndTime = 0.f;
 
-    UFUNCTION(BlueprintPure, Category = "Game|State")
-    bool IsInGameplay() const { return CurrentGameState == EGameState::Gameplay; }
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|State")
+    int32 TotalScore = 0;
 
-    UFUNCTION(BlueprintPure, Category = "Game|State")
-    bool IsPaused() const { return CurrentGameState == EGameState::Paused; }
+    // ============================ 미션 목표 ============================
 
-    // ============================ 챕터 관리 ============================
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Game|Chapters")
-    TMap<EChapterID, FChapterData> Chapters;
-
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnChapterStarted OnChapterStarted;
-
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnChapterCompleted OnChapterCompleted;
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Chapters")
-    void LoadChapter(EChapterID ChapterID);
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Chapters")
-    void StartCurrentChapter();
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Chapters")
-    void CompleteChapter(bool bSuccess);
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Chapters")
-    void RestartChapter();
-
-    UFUNCTION(BlueprintPure, Category = "Game|Chapters")
-    FChapterData GetCurrentChapterData() const;
-
-    UFUNCTION(BlueprintPure, Category = "Game|Chapters")
-    bool IsChapterUnlocked(EChapterID ChapterID) const;
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Chapters")
-    void UnlockChapter(EChapterID ChapterID);
-
-    // ============================ 미션 목표 관리 ============================
-
-    UPROPERTY(BlueprintReadOnly, Category = "Game|Mission")
+    // 현재 활성화된 목표들
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|Mission")
     TArray<UMissionObjective*> ActiveObjectives;
 
-    UPROPERTY(BlueprintReadOnly, Category = "Game|Mission")
-    int32 CurrentScore = 0;
+    // 완료된 목표들
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|Mission")
+    TArray<UMissionObjective*> CompletedObjectives;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Game|Mission|Scoring")
-    float TimeBonus = 100.f; // 남은 시간 1초당 점수
+    // 실패한 목표들
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|Mission")
+    TArray<UMissionObjective*> FailedObjectives;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Game|Mission|Scoring")
-    float OptionalObjectiveBonus = 200.f;
+    // 현재 진행 중인 목표 인덱스 (순차 진행용)
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|Mission")
+    int32 CurrentObjectiveIndex = 0;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Game|Mission|Scoring")
-    float PerfectClearBonus = 500.f;
+    // 순차 진행 모드 (true: 목표를 순서대로 진행, false: 모든 목표 동시 진행)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Mission")
+    bool bSequentialObjectives = true;
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Mission")
+    // ============================ 화재 시스템 설정 ============================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Fire")
+    int32 InitialFireCount = 1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Fire")
+    bool bAutoStartFire = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Fire")
+    float FireStartDelay = 3.f;
+
+    // 화재가 발생할 수 있는 방 목록 (비어있으면 모든 방)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Fire")
+    TArray<ARoomActor*> PotentialFireRooms;
+
+    // ============================ 플레이어 ============================
+
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|Player")
+    APawn* PlayerCharacter;
+
+    // 바이탈 경고 임계값
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Player")
+    float VitalWarningThreshold = 0.3f; // 30% 이하 시 경고
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Player")
+    float VitalCriticalThreshold = 0.15f; // 15% 이하 시 위험
+
+    // ============================ NPC (요구조자) ============================
+
+    // 침실에 있는 요구조자들 (나중에 구체적인 NPC 클래스로 교체)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|NPC")
+    TArray<AActor*> NPCsToRescue;
+
+    // 구조된 NPC들
+    UPROPERTY(BlueprintReadOnly, Category = "GameManager|NPC")
+    TArray<AActor*> RescuedNPCs;
+
+    // ============================ 탈출 지점 ============================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameManager|Escape")
+    AActor* ExitPoint;
+
+    // ============================ 이벤트 ============================
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnGameStateChanged OnGameStateChanged;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnMissionStarted OnMissionStarted;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnMissionCompleted OnMissionCompleted;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnMissionFailed OnMissionFailed;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnObjectiveCompleted OnObjectiveCompleted;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnObjectiveFailed OnObjectiveFailed;
+
+    UPROPERTY(BlueprintAssignable, Category = "GameManager|Events")
+    FOnVitalWarning OnVitalWarning;
+
+    // ============================ 게임 제어 메서드 ============================
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager")
+    void StartGame();
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager")
+    void PauseGame();
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager")
+    void ResumeGame();
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager")
+    void RestartGame();
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager")
+    void EndGame(bool bSuccess, const FString& Reason = TEXT(""));
+
+    // ============================ 미션 관리 메서드 ============================
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Mission")
+    void SetupChapter(EChapter Chapter);
+
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Mission")
     void AddObjective(UMissionObjective* Objective);
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Mission")
-    void AddScore(int32 Points);
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Mission")
+    void StartNextObjective();
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Mission")
-    void SubtractScore(int32 Points);
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Mission")
+    void CompleteCurrentObjective();
 
-    UFUNCTION(BlueprintPure, Category = "Game|Mission")
-    int32 CalculateFinalScore() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Mission")
+    UMissionObjective* GetCurrentObjective() const;
 
-    UFUNCTION(BlueprintPure, Category = "Game|Mission")
-    bool AreAllObjectivesComplete() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Mission")
+    int32 GetTotalObjectiveCount() const { return ActiveObjectives.Num(); }
 
-    UFUNCTION(BlueprintPure, Category = "Game|Mission")
-    bool AreMandatoryObjectivesComplete() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Mission")
+    int32 GetCompletedObjectiveCount() const { return CompletedObjectives.Num(); }
 
-    // ============================ 화재 시나리오 ============================
+    UFUNCTION(BlueprintPure, Category = "GameManager|Mission")
+    float GetMissionProgress01() const;
 
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnFireEventTriggered OnFireEventTriggered;
+    // ============================ 화재 시스템 메서드 ============================
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Fire")
-    void TriggerFireEvent(const FString& EventID);
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Fire")
+    void StartInitialFire();
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Fire")
-    void TriggerFireAtRoom(ARoomActor* Room, ECombustibleType FireType, float Intensity);
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Fire")
+    void CreateFireAtRandomLocation();
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Fire")
-    void TriggerFireAtActor(AActor* TargetActor);
+    UFUNCTION(BlueprintCallable, Category = "GameManager|Fire")
+    void CreateFireInRoom(ARoomActor* Room);
 
-    UFUNCTION(BlueprintPure, Category = "Game|Fire")
-    int32 GetActiveFireCount() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Fire")
+    int32 GetTotalActiveFireCount() const;
 
-    UFUNCTION(BlueprintPure, Category = "Game|Fire")
-    TArray<class AFireActor*> GetAllActiveFires() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Fire")
+    TArray<ARoomActor*> GetAllRooms() const;
 
-    // ============================ NPC 구조 시스템 ============================
+    // ============================ NPC 관리 메서드 ============================
 
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnNPCRescued OnNPCRescued;
+    UFUNCTION(BlueprintCallable, Category = "GameManager|NPC")
+    void RegisterNPC(AActor* NPC);
 
-    UPROPERTY(BlueprintAssignable, Category = "Game|Events")
-    FOnNPCDied OnNPCDied;
+    UFUNCTION(BlueprintCallable, Category = "GameManager|NPC")
+    void RescueNPC(AActor* NPC);
 
-    UFUNCTION(BlueprintCallable, Category = "Game|NPC")
-    void RescueNPC(const FString& NPCID);
+    UFUNCTION(BlueprintPure, Category = "GameManager|NPC")
+    int32 GetRescuedNPCCount() const { return RescuedNPCs.Num(); }
 
-    UFUNCTION(BlueprintCallable, Category = "Game|NPC")
-    void KillNPC(const FString& NPCID, const FString& Reason);
+    UFUNCTION(BlueprintPure, Category = "GameManager|NPC")
+    int32 GetTotalNPCCount() const { return NPCsToRescue.Num(); }
 
-    UFUNCTION(BlueprintPure, Category = "Game|NPC")
-    int32 GetRescuedNPCCount() const;
+    // ============================ 플레이어 바이탈 체크 ============================
 
-    UFUNCTION(BlueprintPure, Category = "Game|NPC")
-    int32 GetTotalNPCCount() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Player")
+    bool IsPlayerAlive() const;
 
-    UFUNCTION(BlueprintPure, Category = "Game|NPC")
-    TArray<FNPCRescueData> GetNPCsInDanger() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager|Player")
+    float GetPlayerHealth01() const;
 
-    // ============================ 통계 ============================
+    UFUNCTION(BlueprintPure, Category = "GameManager|Player")
+    float GetPlayerOxygen01() const;
 
-    UPROPERTY(BlueprintReadOnly, Category = "Game|Statistics")
-    FGameStatistics CurrentSessionStats;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Game|Statistics")
-    FGameStatistics TotalGameStats;
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Statistics")
-    void ResetSessionStatistics();
-
-    UFUNCTION(BlueprintPure, Category = "Game|Statistics")
-    FGameStatistics GetCurrentSessionStats() const { return CurrentSessionStats; }
-
-    UFUNCTION(BlueprintPure, Category = "Game|Statistics")
-    FGameStatistics GetTotalGameStats() const { return TotalGameStats; }
-
-    // ============================ 이벤트 리스닝 ============================
-
-    UFUNCTION()
-    void OnFireExtinguished(class AFireActor* Fire);
-
-    UFUNCTION()
-    void OnBackdraftTriggered();
-
-    UFUNCTION()
-    void OnGasTankBLEVE(FVector Location);
-
-    UFUNCTION()
-    void OnDoorBreached(class ADoorActor* Door);
-
-    UFUNCTION()
-    void OnVentHoleCreated(int32 HoleCount);
-
-    UFUNCTION()
-    void OnPlayerDeath();
-
-    UFUNCTION()
-    void OnWaterUsed(float Amount);
-
-    // ============================ 저장/로드 ============================
-
-    UFUNCTION(BlueprintCallable, Category = "Game|SaveLoad")
-    void SaveGameProgress();
-
-    UFUNCTION(BlueprintCallable, Category = "Game|SaveLoad")
-    void LoadGameProgress();
+    UFUNCTION(BlueprintPure, Category = "GameManager|Player")
+    float GetPlayerTemperature() const;
 
     // ============================ 유틸리티 ============================
 
-    UFUNCTION(BlueprintPure, Category = "Game|Utility")
-    float GetChapterElapsedTime() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager")
+    float GetElapsedGameTime() const;
 
-    UFUNCTION(BlueprintPure, Category = "Game|Utility")
-    float GetChapterRemainingTime() const;
+    UFUNCTION(BlueprintPure, Category = "GameManager")
+    FString GetGameStateString() const;
 
-    UFUNCTION(BlueprintCallable, Category = "Game|Debug")
-    void DebugTriggerAllFireEvents();
-
-    UFUNCTION(BlueprintCallable, Category = "Game|Debug")
-    void DebugPrintChapterInfo();
+    UFUNCTION(BlueprintPure, Category = "GameManager")
+    FString GetChapterString() const;
 
 protected:
-    // 내부 함수
-    void UpdateFireScenario(float DeltaTime);
-    void UpdateNPCDanger(float DeltaTime);
-    void CheckChapterCompletion();
-    void BindGameEvents();
-    void UnbindGameEvents();
-    void InitializeChapters();
+    // ============================ 내부 메서드 ============================
+
+    void ChangeGameState(EGameState NewState);
+
+    // 챕터별 미션 설정
     void SetupChapter1();
-    void SetupChapter2();
+    void SetupChapter2(); // 확장용
+    void SetupChapter3(); // 확장용
 
-    // 시간 추적
-    float ChapterStartTime = 0.f;
-    float ChapterElapsedTime = 0.f;
+    // 이벤트 바인딩
+    void BindFireActorEvents(AFireActor* Fire);
+    void BindRoomActorEvents(ARoomActor* Room);
+    void BindPlayerEvents();
 
-    // 타이머
-    FTimerHandle IntroTimerHandle;
-    FTimerHandle FireScenarioTimerHandle;
+    // 목표 이벤트 핸들러
+    UFUNCTION()
+    void OnObjectiveProgressChanged(UMissionObjective* Objective, float Progress01, FString ProgressText);
+
+    UFUNCTION()
+    void OnObjectiveStatusChanged(UMissionObjective* Objective, EMissionObjectiveStatus NewStatus);
+
+    // 화재 이벤트 핸들러
+    UFUNCTION()
+    void OnFireExtinguished(AFireActor* Fire);
+
+    UFUNCTION()
+    void OnFireSpawned(AFireActor* Fire);
+
+    // 백드래프트 이벤트 핸들러
+    UFUNCTION()
+    void OnBackdraftOccurred();
+
+    // 플레이어 바이탈 체크
+    void CheckPlayerVitals(float DeltaTime);
+
+    // 미션 완료/실패 체크
+    void CheckMissionCompletion();
+
+    // 모든 목표 업데이트
+    void UpdateAllObjectives(float DeltaTime);
+
+    // 플레이어 찾기
+    void FindPlayerCharacter();
+
+    // 씬에서 액터들 찾기
+    void FindSceneActors();
+
+private:
+    // 바이탈 경고 쿨다운
+    float VitalWarningCooldown = 0.f;
+    const float VitalWarningInterval = 2.f;
+
+    // 초기화 완료 플래그
+    bool bIsInitialized = false;
+
+    // 게임 시작 타이머
+    FTimerHandle FireStartTimerHandle;
 };

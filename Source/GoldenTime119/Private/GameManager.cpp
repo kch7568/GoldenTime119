@@ -1,11 +1,7 @@
 // ============================ GameManager.cpp ============================
 #include "GameManager.h"
-#include "MissionObjective.h"
-#include "FireActor.h"
 #include "RoomActor.h"
-#include "GasTankActor.h"
-#include "PressureVesselComponent.h"
-#include "DoorActor.h"
+#include "FireActor.h"
 #include "CombustibleComponent.h"
 #include "VitalComponent.h"
 #include "EngineUtils.h"
@@ -20,284 +16,147 @@ DEFINE_LOG_CATEGORY_STATIC(LogGameManager, Log, All);
 AGameManager::AGameManager()
 {
     PrimaryActorTick.bCanEverTick = true;
+    PrimaryActorTick.TickInterval = 0.1f; // 0.1초마다 업데이트
 }
 
 void AGameManager::BeginPlay()
 {
     Super::BeginPlay();
 
-    // 챕터 초기화
-    InitializeChapters();
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] BeginPlay - Initializing..."));
 
-    // 저장된 진행 상황 로드
-    LoadGameProgress();
+    // 플레이어 찾기
+    FindPlayerCharacter();
 
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Initialized"));
+    // 씬 액터들 찾기
+    FindSceneActors();
+
+    // 플레이어 이벤트 바인딩
+    BindPlayerEvents();
+
+    bIsInitialized = true;
+
+    // 자동 시작 설정이 되어있으면 게임 시작
+    if (bAutoStartFire)
+    {
+        StartGame();
+    }
 }
 
 void AGameManager::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (CurrentGameState == EGameState::Gameplay)
+    if (!bIsInitialized) return;
+
+    // 게임 진행 중일 때만 업데이트
+    if (CurrentGameState == EGameState::InProgress)
     {
-        ChapterElapsedTime += DeltaTime;
-        CurrentSessionStats.TotalPlayTime += DeltaTime;
+        // 모든 목표 업데이트
+        UpdateAllObjectives(DeltaTime);
 
-        // 화재 시나리오 업데이트
-        UpdateFireScenario(DeltaTime);
+        // 플레이어 바이탈 체크
+        CheckPlayerVitals(DeltaTime);
 
-        // NPC 위험도 업데이트
-        UpdateNPCDanger(DeltaTime);
-
-        // 완료 조건 체크
-        CheckChapterCompletion();
+        // 미션 완료/실패 체크
+        CheckMissionCompletion();
     }
 }
 
-// ============================ 싱글톤 접근 ============================
-
-AGameManager* AGameManager::GetGameManager(const UObject* WorldContextObject)
+void AGameManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    if (!WorldContextObject) return nullptr;
+    // 타이머 정리
+    GetWorld()->GetTimerManager().ClearTimer(FireStartTimerHandle);
 
-    UWorld* World = WorldContextObject->GetWorld();
-    if (!World) return nullptr;
-
-    // 월드에서 GameManager 찾기
-    for (TActorIterator<AGameManager> It(World); It; ++It)
-    {
-        return *It;
-    }
-
-    return nullptr;
+    Super::EndPlay(EndPlayReason);
 }
 
-// ============================ 게임 상태 ============================
+// ============================ 게임 제어 메서드 ============================
 
-void AGameManager::ChangeGameState(EGameState NewState)
+void AGameManager::StartGame()
 {
-    if (CurrentGameState == NewState)
-        return;
-
-    const EGameState OldState = CurrentGameState;
-    CurrentGameState = NewState;
-
-    OnGameStateChanged.Broadcast(NewState);
-
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] State: %s -> %s"),
-        *UEnum::GetValueAsString(OldState),
-        *UEnum::GetValueAsString(NewState));
-
-    // 상태별 처리
-    switch (NewState)
+    if (CurrentGameState != EGameState::NotStarted && CurrentGameState != EGameState::Ended)
     {
-    case EGameState::Gameplay:
-        // 게임 재개
-        UGameplayStatics::SetGamePaused(GetWorld(), false);
-        break;
-
-    case EGameState::Paused:
-        // 일시정지
-        UGameplayStatics::SetGamePaused(GetWorld(), true);
-        break;
-
-    case EGameState::MissionComplete:
-        CompleteChapter(true);
-        break;
-
-    case EGameState::MissionFailed:
-        CompleteChapter(false);
-        break;
-
-    default:
-        break;
-    }
-}
-
-// ============================ 챕터 관리 ============================
-
-void AGameManager::LoadChapter(EChapterID ChapterID)
-{
-    if (!Chapters.Contains(ChapterID))
-    {
-        UE_LOG(LogGameManager, Error, TEXT("[GameManager] Chapter %s not found!"),
-            *UEnum::GetValueAsString(ChapterID));
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Game already started"));
         return;
     }
 
-    const FChapterData& ChapterData = Chapters[ChapterID];
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Starting Game - Chapter %s"),
+        *GetChapterString());
 
-    if (!ChapterData.bIsUnlocked)
+    ChangeGameState(EGameState::Starting);
+
+    GameStartTime = GetWorld()->GetTimeSeconds();
+    TotalScore = 0;
+
+    // 챕터 설정
+    SetupChapter(CurrentChapter);
+
+    // 화재 시작 (딜레이 적용)
+    if (bAutoStartFire)
     {
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter %s is locked!"),
-            *UEnum::GetValueAsString(ChapterID));
-        return;
+        GetWorld()->GetTimerManager().SetTimer(
+            FireStartTimerHandle,
+            this,
+            &AGameManager::StartInitialFire,
+            FireStartDelay,
+            false
+        );
     }
 
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Loading Chapter: %s"),
-        *ChapterData.ChapterTitle.ToString());
+    // 게임 진행 상태로 전환
+    ChangeGameState(EGameState::InProgress);
 
-    CurrentChapterID = ChapterID;
-
-    // 이미 올바른 레벨에 있는지 체크
-    UWorld* World = GetWorld();
-    if (World && ChapterData.LevelName != NAME_None)
+    // 첫 번째 목표 시작 (순차 모드일 경우)
+    if (bSequentialObjectives && ActiveObjectives.Num() > 0)
     {
-        FString CurrentLevelName = World->GetMapName();
-        CurrentLevelName.RemoveFromStart(World->StreamingLevelsPrefix); // "UEDPIE_0_" 같은 prefix 제거
-
-        FString TargetLevelName = ChapterData.LevelName.ToString();
-
-        UE_LOG(LogGameManager, Log, TEXT("[GameManager] Current Level: '%s', Target Level: '%s'"),
-            *CurrentLevelName, *TargetLevelName);
-
-        // 레벨 이름이 포함되어 있으면 (부분 일치)
-        if (CurrentLevelName.Contains(TargetLevelName) || TargetLevelName.Contains(CurrentLevelName))
-        {
-            UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Already in correct level, skipping load"));
-            // 레벨 로드 없이 CurrentChapterID만 설정하고 리턴
-            return;
-        }
-    }
-
-    ChangeGameState(EGameState::Loading);
-
-    // 레벨 로드
-    if (ChapterData.LevelName != NAME_None)
-    {
-        UGameplayStatics::OpenLevel(this, ChapterData.LevelName);
-    }
-}
-
-void AGameManager::StartCurrentChapter()
-{
-    if (!Chapters.Contains(CurrentChapterID))
-    {
-        UE_LOG(LogGameManager, Error, TEXT("[GameManager] No valid chapter to start"));
-        return;
-    }
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] ===== CHAPTER START: %s ====="),
-        *ChapterData.ChapterTitle.ToString());
-
-    // 통계 초기화
-    ResetSessionStatistics();
-
-    // 챕터 시간 초기화
-    ChapterStartTime = GetWorld()->GetTimeSeconds();
-    ChapterElapsedTime = 0.f;
-
-    // 인트로 표시
-    ChangeGameState(EGameState::ChapterIntro);
-
-    // 인트로 후 게임 시작
-    GetWorld()->GetTimerManager().SetTimer(
-        IntroTimerHandle,
-        [this, ChapterData]()
-        {
-            // 목표 설정
-            ActiveObjectives = ChapterData.ChapterObjectives;
-            CurrentScore = 0;
-
-            // 모든 목표 시작
-            for (UMissionObjective* Obj : ActiveObjectives)
-            {
-                if (IsValid(Obj))
-                {
-                    Obj->StartObjective(GetWorld());
-                }
-            }
-
-            // 이벤트 바인딩
-            BindGameEvents();
-
-            // 게임플레이 시작
-            ChangeGameState(EGameState::Gameplay);
-
-            OnChapterStarted.Broadcast(CurrentChapterID);
-
-            UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter gameplay started - Objectives: %d"),
-                ActiveObjectives.Num());
-        },
-        ChapterData.IntroDuration,
-        false
-    );
-}
-
-void AGameManager::CompleteChapter(bool bSuccess)
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] ===== CHAPTER %s: %s ====="),
-        bSuccess ? TEXT("SUCCESS") : TEXT("FAILED"),
-        *ChapterData.ChapterTitle.ToString());
-
-    // 통계 저장
-    TotalGameStats.TotalFiresExtinguished += CurrentSessionStats.TotalFiresExtinguished;
-    TotalGameStats.TotalNPCsRescued += CurrentSessionStats.TotalNPCsRescued;
-    TotalGameStats.TotalBackdraftsTriggered += CurrentSessionStats.TotalBackdraftsTriggered;
-    TotalGameStats.TotalGasTanksExploded += CurrentSessionStats.TotalGasTanksExploded;
-    TotalGameStats.TotalDoorsBreached += CurrentSessionStats.TotalDoorsBreached;
-    TotalGameStats.TotalVentHolesCreated += CurrentSessionStats.TotalVentHolesCreated;
-    TotalGameStats.TotalWaterUsed += CurrentSessionStats.TotalWaterUsed;
-    TotalGameStats.TotalPlayTime += CurrentSessionStats.TotalPlayTime;
-
-    if (bSuccess)
-    {
-        ChapterData.bIsCompleted = true;
-
-        // 최고 기록 갱신
-        const int32 FinalScore = CalculateFinalScore();
-        if (FinalScore > ChapterData.BestScore)
-        {
-            ChapterData.BestScore = FinalScore;
-        }
-
-        if (ChapterElapsedTime > 0.f)
-        {
-            if (ChapterData.BestTime <= 0.f || ChapterElapsedTime < ChapterData.BestTime)
-            {
-                ChapterData.BestTime = ChapterElapsedTime;
-            }
-        }
-
-        // 다음 챕터 언락
-        const int32 NextChapterIndex = static_cast<int32>(CurrentChapterID) + 1;
-        if (NextChapterIndex < static_cast<int32>(EChapterID::Tutorial))
-        {
-            const EChapterID NextChapter = static_cast<EChapterID>(NextChapterIndex);
-            UnlockChapter(NextChapter);
-        }
+        StartNextObjective();
     }
     else
     {
-        TotalGameStats.DeathCount++;
+        // 동시 진행 모드: 모든 목표 시작
+        for (UMissionObjective* Obj : ActiveObjectives)
+        {
+            if (IsValid(Obj))
+            {
+                Obj->StartObjective(GetWorld());
+            }
+        }
     }
 
-    // 이벤트 언바인딩
-    UnbindGameEvents();
-
-    // 저장
-    SaveGameProgress();
-
-    OnChapterCompleted.Broadcast(CurrentChapterID, bSuccess);
-
-    ChangeGameState(bSuccess ? EGameState::ChapterComplete : EGameState::GameOver);
+    OnMissionStarted.Broadcast(CurrentChapter);
 }
 
-void AGameManager::RestartChapter()
+void AGameManager::PauseGame()
 {
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Restarting chapter..."));
+    if (CurrentGameState != EGameState::InProgress) return;
 
-    UnbindGameEvents();
+    ChangeGameState(EGameState::Paused);
+    UGameplayStatics::SetGamePaused(GetWorld(), true);
 
-    // 목표 초기화
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Game Paused"));
+}
+
+void AGameManager::ResumeGame()
+{
+    if (CurrentGameState != EGameState::Paused) return;
+
+    ChangeGameState(EGameState::InProgress);
+    UGameplayStatics::SetGamePaused(GetWorld(), false);
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Game Resumed"));
+}
+
+void AGameManager::RestartGame()
+{
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Restarting Game"));
+
+    // 게임 상태 리셋
+    CurrentGameState = EGameState::NotStarted;
+    CurrentObjectiveIndex = 0;
+    TotalScore = 0;
+
+    // 목표들 리셋
     for (UMissionObjective* Obj : ActiveObjectives)
     {
         if (IsValid(Obj))
@@ -306,157 +165,611 @@ void AGameManager::RestartChapter()
         }
     }
 
-    StartCurrentChapter();
+    CompletedObjectives.Empty();
+    FailedObjectives.Empty();
+    RescuedNPCs.Empty();
+
+    // 레벨 리로드 (블루프린트에서 구현 가능하도록 이벤트 발생)
+    // UGameplayStatics::OpenLevel(this, FName(*UGameplayStatics::GetCurrentLevelName(this)));
+
+    // 재시작
+    StartGame();
 }
 
-FChapterData AGameManager::GetCurrentChapterData() const
+void AGameManager::EndGame(bool bSuccess, const FString& Reason)
 {
-    if (Chapters.Contains(CurrentChapterID))
+    if (CurrentGameState == EGameState::Ended) return;
+
+    GameEndTime = GetWorld()->GetTimeSeconds();
+
+    if (bSuccess)
     {
-        return Chapters[CurrentChapterID];
+        ChangeGameState(EGameState::MissionComplete);
+        OnMissionCompleted.Broadcast(CurrentChapter, TotalScore);
+
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Mission COMPLETED - Score: %d"), TotalScore);
     }
-    return FChapterData();
+    else
+    {
+        ChangeGameState(EGameState::MissionFailed);
+        OnMissionFailed.Broadcast(CurrentChapter, Reason);
+
+        UE_LOG(LogGameManager, Error, TEXT("[GameManager] Mission FAILED - Reason: %s"), *Reason);
+    }
+
+    ChangeGameState(EGameState::Ended);
 }
 
-bool AGameManager::IsChapterUnlocked(EChapterID ChapterID) const
+// ============================ 미션 관리 메서드 ============================
+
+void AGameManager::SetupChapter(EChapter Chapter)
 {
-    if (Chapters.Contains(ChapterID))
+    // 기존 목표들 클리어
+    ActiveObjectives.Empty();
+    CompletedObjectives.Empty();
+    FailedObjectives.Empty();
+    CurrentObjectiveIndex = 0;
+
+    switch (Chapter)
     {
-        return Chapters[ChapterID].bIsUnlocked;
+    case EChapter::Chapter1:
+        SetupChapter1();
+        break;
+
+    case EChapter::Chapter2:
+        SetupChapter2();
+        break;
+
+    case EChapter::Chapter3:
+        SetupChapter3();
+        break;
+
+    default:
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Unknown chapter"));
+        break;
     }
-    return false;
+
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter Setup Complete - %d objectives"),
+        ActiveObjectives.Num());
 }
 
-void AGameManager::UnlockChapter(EChapterID ChapterID)
+void AGameManager::SetupChapter1()
 {
-    if (Chapters.Contains(ChapterID))
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Setting up Chapter 1"));
+
+    // Objective 1: Extinguish All Fires
+    UMissionObjective* FireObjective = NewObject<UMissionObjective>(this);
+    FireObjective->ObjectiveType = EMissionObjectiveType::ExtinguishAllFires;
+    FireObjective->ObjectiveTitle = FText::FromString(TEXT("Extinguish All Fires"));
+    FireObjective->ObjectiveDescription = FText::FromString(TEXT("Put out all fires"));
+    FireObjective->ScoreReward = 300;
+    FireObjective->bCanFail = true;
+    FireObjective->bFailOnTimeout = false;
+    FireObjective->TargetCount = InitialFireCount;
+    AddObjective(FireObjective);
+
+    // Objective 2: Survival
+    UMissionObjective* SurvivalObjective = NewObject<UMissionObjective>(this);
+    SurvivalObjective->ObjectiveType = EMissionObjectiveType::KeepHealthAbove;
+    SurvivalObjective->ObjectiveTitle = FText::FromString(TEXT("Survival"));
+    SurvivalObjective->ObjectiveDescription = FText::FromString(TEXT("Keep your health above 1%"));
+    SurvivalObjective->ScoreReward = 200;
+    SurvivalObjective->ThresholdValue = 0.01f;
+    SurvivalObjective->bCanFail = true;
+    SurvivalObjective->bFailOnPlayerDeath = true;
+    SurvivalObjective->DurationSeconds = 600.f;
+    SurvivalObjective->bIsOptional = false;
+    AddObjective(SurvivalObjective);
+
+    // Objective 3: Rescue NPCs
+    UMissionObjective* RescueObjective = NewObject<UMissionObjective>(this);
+    RescueObjective->ObjectiveType = EMissionObjectiveType::RescueNPC;
+    RescueObjective->ObjectiveTitle = FText::FromString(TEXT("Rescue Victims"));
+    RescueObjective->ObjectiveDescription = FText::FromString(TEXT("Rescue 2 victims in the bedroom"));
+    RescueObjective->ScoreReward = 500;
+    RescueObjective->TargetNPCs = NPCsToRescue;
+    RescueObjective->bCanFail = false;
+    AddObjective(RescueObjective);
+
+    // Objective 4: Escape
+    if (IsValid(ExitPoint))
     {
-        Chapters[ChapterID].bIsUnlocked = true;
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter unlocked: %s"),
-            *UEnum::GetValueAsString(ChapterID));
+        UMissionObjective* EscapeObjective = NewObject<UMissionObjective>(this);
+        EscapeObjective->ObjectiveType = EMissionObjectiveType::EscapeToExitPoint;
+        EscapeObjective->ObjectiveTitle = FText::FromString(TEXT("Escape"));
+        EscapeObjective->ObjectiveDescription = FText::FromString(TEXT("Escape to a safe location"));
+        EscapeObjective->ScoreReward = 300;
+        EscapeObjective->ExitPoint = ExitPoint;
+        EscapeObjective->ExitReachDistance = 200.f;
+        EscapeObjective->MaxDistanceForProgress = 5000.f;
+        EscapeObjective->bCanFail = false;
+        AddObjective(EscapeObjective);
     }
+
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter 1 setup complete - %d objectives"),
+        ActiveObjectives.Num());
 }
 
-// ============================ 미션 목표 관리 ============================
+void AGameManager::SetupChapter2()
+{
+    // 챕터 2는 추후 확장
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter 2 - Not implemented yet"));
+}
+
+void AGameManager::SetupChapter3()
+{
+    // 챕터 3은 추후 확장
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapter 3 - Not implemented yet"));
+}
 
 void AGameManager::AddObjective(UMissionObjective* Objective)
 {
-    if (!IsValid(Objective))
-        return;
+    if (!IsValid(Objective)) return;
 
     ActiveObjectives.Add(Objective);
 
-    // 이미 게임플레이 중이면 즉시 시작
-    if (CurrentGameState == EGameState::Gameplay)
-    {
-        Objective->StartObjective(GetWorld());
-    }
+    // 이벤트 바인딩
+    Objective->OnProgressChanged.AddDynamic(this, &AGameManager::OnObjectiveProgressChanged);
+    Objective->OnStatusChanged.AddDynamic(this, &AGameManager::OnObjectiveStatusChanged);
 
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Objective added: %s"),
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Objective Added: %s"),
         *Objective->ObjectiveTitle.ToString());
 }
 
-void AGameManager::AddScore(int32 Points)
+void AGameManager::StartNextObjective()
 {
-    if (Points <= 0)
+    if (!bSequentialObjectives) return;
+    if (CurrentObjectiveIndex >= ActiveObjectives.Num()) return;
+
+    UMissionObjective* NextObjective = ActiveObjectives[CurrentObjectiveIndex];
+    if (IsValid(NextObjective))
+    {
+        NextObjective->StartObjective(GetWorld());
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Started Objective %d: %s"),
+            CurrentObjectiveIndex + 1, *NextObjective->ObjectiveTitle.ToString());
+    }
+}
+
+void AGameManager::CompleteCurrentObjective()
+{
+    if (!bSequentialObjectives) return;
+
+    UMissionObjective* CurrentObj = GetCurrentObjective();
+    if (IsValid(CurrentObj) && !CurrentObj->IsCompleted())
+    {
+        CurrentObj->CompleteObjective();
+    }
+
+    CurrentObjectiveIndex++;
+
+    // 다음 목표 시작
+    if (CurrentObjectiveIndex < ActiveObjectives.Num())
+    {
+        StartNextObjective();
+    }
+}
+
+UMissionObjective* AGameManager::GetCurrentObjective() const
+{
+    if (bSequentialObjectives && CurrentObjectiveIndex < ActiveObjectives.Num())
+    {
+        return ActiveObjectives[CurrentObjectiveIndex];
+    }
+
+    return nullptr;
+}
+
+float AGameManager::GetMissionProgress01() const
+{
+    if (ActiveObjectives.Num() == 0) return 0.f;
+
+    int32 TotalCompleted = CompletedObjectives.Num();
+    int32 TotalObjectives = ActiveObjectives.Num();
+
+    return (float)TotalCompleted / (float)TotalObjectives;
+}
+
+// ============================ 화재 시스템 메서드 ============================
+
+void AGameManager::StartInitialFire()
+{
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Starting initial fires..."));
+
+    for (int32 i = 0; i < InitialFireCount; ++i)
+    {
+        CreateFireAtRandomLocation();
+    }
+}
+
+void AGameManager::CreateFireAtRandomLocation()
+{
+    TArray<ARoomActor*> AvailableRooms;
+
+    // PotentialFireRooms가 설정되어 있으면 그것 사용, 아니면 모든 방
+    if (PotentialFireRooms.Num() > 0)
+    {
+        AvailableRooms = PotentialFireRooms;
+    }
+    else
+    {
+        AvailableRooms = GetAllRooms();
+    }
+
+    if (AvailableRooms.Num() == 0)
+    {
+        UE_LOG(LogGameManager, Error, TEXT("[GameManager] No rooms available for fire"));
         return;
+    }
 
-    CurrentScore += Points;
+    // 랜덤 방 선택
+    int32 RandomIndex = FMath::RandRange(0, AvailableRooms.Num() - 1);
+    ARoomActor* SelectedRoom = AvailableRooms[RandomIndex];
 
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Score +%d -> %d"), Points, CurrentScore);
+    CreateFireInRoom(SelectedRoom);
 }
 
-void AGameManager::SubtractScore(int32 Points)
+void AGameManager::CreateFireInRoom(ARoomActor* Room)
 {
-    if (Points <= 0)
+    if (!IsValid(Room)) return;
+
+    // RoomActor가 이미 등록한 가연물 목록 사용
+    TArray<UCombustibleComponent*> Combustibles;
+    Room->GetCombustiblesInRoom(Combustibles, true); // true = 이미 타고 있는 것 제외
+
+    if (Combustibles.Num() == 0)
+    {
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] No combustibles found in room %s"),
+            *Room->GetName());
         return;
+    }
 
-    CurrentScore = FMath::Max(0, CurrentScore - Points);
+    // 랜덤 가연물 선택
+    int32 RandomIndex = FMath::RandRange(0, Combustibles.Num() - 1);
+    UCombustibleComponent* SelectedCombustible = Combustibles[RandomIndex];
 
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Score -%d -> %d"), Points, CurrentScore);
+    if (IsValid(SelectedCombustible))
+    {
+        // RoomActor의 IgniteActor를 사용하여 발화
+        Room->IgniteActor(SelectedCombustible->GetOwner());
+
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Fire started in room %s at %s"),
+            *Room->GetName(), *SelectedCombustible->GetOwner()->GetName());
+    }
 }
 
-int32 AGameManager::CalculateFinalScore() const
+int32 AGameManager::GetTotalActiveFireCount() const
 {
-    int32 Score = CurrentScore;
+    int32 TotalCount = 0;
 
-    if (!Chapters.Contains(CurrentChapterID))
-        return Score;
-
-    const FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    // 시간 보너스
-    if (ChapterData.TimeLimit > 0.f)
+    for (TActorIterator<AFireActor> It(GetWorld()); It; ++It)
     {
-        const float Remaining = GetChapterRemainingTime();
-        if (Remaining > 0.f)
+        AFireActor* Fire = *It;
+        if (IsValid(Fire))
         {
-            const int32 Bonus = FMath::FloorToInt(Remaining * TimeBonus);
-            Score += Bonus;
-            UE_LOG(LogGameManager, Log, TEXT("[GameManager] Time bonus: +%d"), Bonus);
+            TotalCount++;
         }
     }
 
-    // 선택 목표 보너스
-    int32 OptionalCompleted = 0;
-    for (const UMissionObjective* Obj : ActiveObjectives)
-    {
-        if (IsValid(Obj) && Obj->bIsOptional && Obj->IsCompleted())
-        {
-            OptionalCompleted++;
-        }
-    }
-    if (OptionalCompleted > 0)
-    {
-        const int32 Bonus = FMath::FloorToInt(OptionalCompleted * OptionalObjectiveBonus);
-        Score += Bonus;
-        UE_LOG(LogGameManager, Log, TEXT("[GameManager] Optional bonus: +%d"), Bonus);
-    }
-
-    // 완벽 클리어 보너스
-    if (AreAllObjectivesComplete())
-    {
-        Score += FMath::FloorToInt(PerfectClearBonus);
-        UE_LOG(LogGameManager, Log, TEXT("[GameManager] Perfect clear bonus: +%.0f"), PerfectClearBonus);
-    }
-
-    return FMath::Clamp(Score, 0, ChapterData.TargetScore);
+    return TotalCount;
 }
 
-bool AGameManager::AreAllObjectivesComplete() const
+TArray<ARoomActor*> AGameManager::GetAllRooms() const
 {
-    for (const UMissionObjective* Obj : ActiveObjectives)
+    TArray<ARoomActor*> Rooms;
+
+    for (TActorIterator<ARoomActor> It(GetWorld()); It; ++It)
     {
-        if (IsValid(Obj) && !Obj->IsCompleted())
+        ARoomActor* Room = *It;
+        if (IsValid(Room))
         {
-            return false;
+            Rooms.Add(Room);
         }
     }
-    return ActiveObjectives.Num() > 0;
+
+    return Rooms;
 }
 
-bool AGameManager::AreMandatoryObjectivesComplete() const
+// ============================ NPC 관리 메서드 ============================
+
+void AGameManager::RegisterNPC(AActor* NPC)
 {
-    for (const UMissionObjective* Obj : ActiveObjectives)
+    if (!IsValid(NPC)) return;
+    if (NPCsToRescue.Contains(NPC)) return;
+
+    NPCsToRescue.Add(NPC);
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] NPC Registered: %s"), *NPC->GetName());
+}
+
+void AGameManager::RescueNPC(AActor* NPC)
+{
+    if (!IsValid(NPC)) return;
+    if (!NPCsToRescue.Contains(NPC)) return;
+    if (RescuedNPCs.Contains(NPC)) return;
+
+    RescuedNPCs.Add(NPC);
+
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] NPC Rescued: %s (%d/%d)"),
+        *NPC->GetName(), RescuedNPCs.Num(), NPCsToRescue.Num());
+
+    // 모든 목표에 알림
+    for (UMissionObjective* Obj : ActiveObjectives)
     {
-        if (IsValid(Obj) && !Obj->bIsOptional && !Obj->IsCompleted())
+        if (IsValid(Obj))
         {
-            return false;
+            Obj->NotifyNPCRescued(NPC);
         }
     }
-    return true;
 }
 
-// ============================ 화재 시나리오 ============================
+// ============================ 플레이어 바이탈 체크 ============================
 
-void AGameManager::UpdateFireScenario(float DeltaTime)
+bool AGameManager::IsPlayerAlive() const
 {
-    if (!Chapters.Contains(CurrentChapterID))
+    if (!IsValid(PlayerCharacter)) return false;
+
+    UVitalComponent* Vital = PlayerCharacter->FindComponentByClass<UVitalComponent>();
+    if (!IsValid(Vital)) return true;
+
+    return Vital->GetHp01() > 0.f;
+}
+
+float AGameManager::GetPlayerHealth01() const
+{
+    if (!IsValid(PlayerCharacter)) return 0.f;
+
+    UVitalComponent* Vital = PlayerCharacter->FindComponentByClass<UVitalComponent>();
+    if (!IsValid(Vital)) return 1.f;
+
+    return Vital->GetHp01();
+}
+
+float AGameManager::GetPlayerOxygen01() const
+{
+    if (!IsValid(PlayerCharacter)) return 0.f;
+
+    UVitalComponent* Vital = PlayerCharacter->FindComponentByClass<UVitalComponent>();
+    if (!IsValid(Vital)) return 1.f;
+
+    return Vital->GetO201();
+}
+
+float AGameManager::GetPlayerTemperature() const
+{
+    if (!IsValid(PlayerCharacter)) return 0.f;
+
+    UVitalComponent* Vital = PlayerCharacter->FindComponentByClass<UVitalComponent>();
+    if (!IsValid(Vital)) return 0.f;
+
+    return Vital->GetTemp01();
+}
+
+void AGameManager::CheckPlayerVitals(float DeltaTime)
+{
+    if (!IsValid(PlayerCharacter)) return;
+
+    UVitalComponent* Vital = PlayerCharacter->FindComponentByClass<UVitalComponent>();
+    if (!IsValid(Vital)) return;
+
+    const float HP = Vital->GetHp01();
+    const float O2 = Vital->GetO201();
+    const float Temp = Vital->GetTemp01();
+
+    // 플레이어 사망 체크
+    if (HP <= 0.f)
+    {
+        // 모든 목표에 알림
+        for (UMissionObjective* Obj : ActiveObjectives)
+        {
+            if (IsValid(Obj))
+            {
+                Obj->NotifyPlayerDeath();
+            }
+        }
+
+        EndGame(false, TEXT("Player died"));
         return;
+    }
 
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
+    // 바이탈 경고 쿨다운 감소
+    if (VitalWarningCooldown > 0.f)
+    {
+        VitalWarningCooldown -= DeltaTime;
+        return;
+    }
 
-    // 모든 목표 업데이트
+    // 위험 수준 체크
+    if (HP < VitalCriticalThreshold)
+    {
+        OnVitalWarning.Broadcast(TEXT("Health"), HP);
+        VitalWarningCooldown = VitalWarningInterval;
+    }
+    else if (O2 < VitalCriticalThreshold)
+    {
+        OnVitalWarning.Broadcast(TEXT("Oxygen"), O2);
+        VitalWarningCooldown = VitalWarningInterval;
+    }
+    else if (Temp > 0.7f) // 70% 이상 위험 체온
+    {
+        OnVitalWarning.Broadcast(TEXT("Temperature"), Temp);
+        VitalWarningCooldown = VitalWarningInterval;
+    }
+    // 경고 수준 체크
+    else if (HP < VitalWarningThreshold)
+    {
+        OnVitalWarning.Broadcast(TEXT("Health"), HP);
+        VitalWarningCooldown = VitalWarningInterval * 2.f;
+    }
+    else if (O2 < VitalWarningThreshold)
+    {
+        OnVitalWarning.Broadcast(TEXT("Oxygen"), O2);
+        VitalWarningCooldown = VitalWarningInterval * 2.f;
+    }
+}
+
+// ============================ 내부 메서드 ============================
+
+void AGameManager::ChangeGameState(EGameState NewState)
+{
+    if (CurrentGameState == NewState) return;
+
+    EGameState OldState = CurrentGameState;
+    CurrentGameState = NewState;
+
+    OnGameStateChanged.Broadcast(OldState, NewState);
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] State Changed: %s -> %s"),
+        *UEnum::GetValueAsString(OldState),
+        *UEnum::GetValueAsString(NewState));
+}
+
+void AGameManager::BindFireActorEvents(AFireActor* Fire)
+{
+    if (!IsValid(Fire)) return;
+
+    // FireActor 이벤트 바인딩
+    // Note: FireActor.h에 델리게이트가 정의되어 있지 않으므로
+    // RoomActor의 OnFireExtinguished/OnFireStarted 이벤트를 활용
+    // 또는 추후 FireActor에 델리게이트 추가 필요
+}
+
+void AGameManager::BindRoomActorEvents(ARoomActor* Room)
+{
+    if (!IsValid(Room)) return;
+
+    // RoomActor 이벤트 바인딩
+    Room->OnBackdraft.AddDynamic(this, &AGameManager::OnBackdraftOccurred);
+
+    // 화재 진압 이벤트 바인딩
+    Room->OnFireExtinguished.AddDynamic(this, &AGameManager::OnFireExtinguished);
+    Room->OnFireSpawned.AddDynamic(this, &AGameManager::OnFireSpawned);
+}
+
+void AGameManager::BindPlayerEvents()
+{
+    // 플레이어 바이탈 이벤트는 CheckPlayerVitals에서 폴링 방식으로 체크
+}
+
+void AGameManager::OnObjectiveProgressChanged(UMissionObjective* Objective, float Progress01, FString ProgressText)
+{
+    if (!IsValid(Objective)) return;
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Objective Progress: %s - %.1f%% (%s)"),
+        *Objective->ObjectiveTitle.ToString(), Progress01 * 100.f, *ProgressText);
+}
+
+void AGameManager::OnObjectiveStatusChanged(UMissionObjective* Objective, EMissionObjectiveStatus NewStatus)
+{
+    if (!IsValid(Objective)) return;
+
+    if (NewStatus == EMissionObjectiveStatus::Completed)
+    {
+        if (!CompletedObjectives.Contains(Objective))
+        {
+            CompletedObjectives.Add(Objective);
+            TotalScore += Objective->ScoreReward;
+
+            OnObjectiveCompleted.Broadcast(Objective);
+
+            UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Objective COMPLETED: %s (+%d score)"),
+                *Objective->ObjectiveTitle.ToString(), Objective->ScoreReward);
+
+            // 순차 모드: 다음 목표 시작
+            if (bSequentialObjectives)
+            {
+                CurrentObjectiveIndex++;
+                StartNextObjective();
+            }
+        }
+    }
+    else if (NewStatus == EMissionObjectiveStatus::Failed)
+    {
+        if (!FailedObjectives.Contains(Objective))
+        {
+            FailedObjectives.Add(Objective);
+
+            OnObjectiveFailed.Broadcast(Objective);
+
+            UE_LOG(LogGameManager, Error, TEXT("[GameManager] Objective FAILED: %s"),
+                *Objective->ObjectiveTitle.ToString());
+
+            // 필수 목표 실패 시 게임 종료
+            if (!Objective->bIsOptional)
+            {
+                EndGame(false, FString::Printf(TEXT("Failed: %s"), *Objective->ObjectiveTitle.ToString()));
+            }
+        }
+    }
+}
+
+void AGameManager::OnFireExtinguished(AFireActor* Fire)
+{
+    if (!IsValid(Fire)) return;
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Fire Extinguished: %s"), *Fire->GetName());
+
+    // 모든 목표에 알림
+    for (UMissionObjective* Obj : ActiveObjectives)
+    {
+        if (IsValid(Obj))
+        {
+            Obj->NotifyFireExtinguished();
+        }
+    }
+}
+
+void AGameManager::OnFireSpawned(AFireActor* Fire)
+{
+    if (!IsValid(Fire)) return;
+
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Fire Spawned: %s"), *Fire->GetName());
+
+    // 새로 생성된 Fire에 이벤트 바인딩 (필요시)
+    BindFireActorEvents(Fire);
+}
+
+void AGameManager::OnBackdraftOccurred()
+{
+    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Backdraft Occurred!"));
+
+    // 모든 목표에 알림
+    for (UMissionObjective* Obj : ActiveObjectives)
+    {
+        if (IsValid(Obj))
+        {
+            Obj->NotifyBackdraftOccurred();
+        }
+    }
+}
+
+void AGameManager::CheckMissionCompletion()
+{
+    if (CurrentGameState != EGameState::InProgress) return;
+
+    // 모든 필수 목표 완료 체크
+    bool bAllRequiredComplete = true;
+
+    for (UMissionObjective* Obj : ActiveObjectives)
+    {
+        if (!IsValid(Obj)) continue;
+        if (Obj->bIsOptional) continue;
+
+        if (!Obj->IsCompleted())
+        {
+            bAllRequiredComplete = false;
+            break;
+        }
+    }
+
+    // 모든 필수 목표 완료 시 미션 성공
+    if (bAllRequiredComplete)
+    {
+        EndGame(true, TEXT("All objectives completed"));
+    }
+}
+
+void AGameManager::UpdateAllObjectives(float DeltaTime)
+{
     for (UMissionObjective* Obj : ActiveObjectives)
     {
         if (IsValid(Obj) && Obj->IsInProgress())
@@ -464,677 +777,110 @@ void AGameManager::UpdateFireScenario(float DeltaTime)
             Obj->UpdateProgress(DeltaTime, GetWorld());
         }
     }
+}
 
-    // 스크립트 기반 화재 발생
-    if (ChapterData.ScenarioType == EFireScenarioType::Scripted)
+void AGameManager::FindPlayerCharacter()
+{
+    // VR Template 기반: BP_VRPawn은 "Player" 태그를 가짐
+    // 먼저 태그로 찾기 시도
+    TArray<AActor*> FoundActors;
+    UGameplayStatics::GetAllActorsWithTag(GetWorld(), FName("Player"), FoundActors);
+
+    if (FoundActors.Num() > 0 && IsValid(FoundActors[0]))
     {
-        for (FFireSpawnEvent& Event : ChapterData.FireEvents)
+        PlayerCharacter = Cast<APawn>(FoundActors[0]);
+
+        if (IsValid(PlayerCharacter))
         {
-            if (Event.bHasTriggered)
-                continue;
-
-            if (ChapterElapsedTime >= Event.TriggerTime)
-            {
-                // 화재 발생
-                if (IsValid(Event.TargetRoom))
-                {
-                    TriggerFireAtRoom(Event.TargetRoom, Event.FireType, Event.InitialIntensity);
-                }
-                else if (IsValid(Event.TargetActor))
-                {
-                    TriggerFireAtActor(Event.TargetActor);
-                }
-
-                Event.bHasTriggered = true;
-                OnFireEventTriggered.Broadcast(Event.EventID);
-
-                UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Fire event triggered: %s at %.1fs"),
-                    *Event.EventID, ChapterElapsedTime);
-            }
+            UE_LOG(LogGameManager, Log, TEXT("[GameManager] Player found by tag: %s"),
+                *PlayerCharacter->GetName());
+            return;
         }
     }
-}
 
-void AGameManager::TriggerFireEvent(const FString& EventID)
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (FFireSpawnEvent& Event : ChapterData.FireEvents)
+    // 태그로 못 찾으면 PlayerController를 통해 찾기
+    APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+    if (IsValid(PlayerPawn))
     {
-        if (Event.EventID == EventID && !Event.bHasTriggered)
-        {
-            if (IsValid(Event.TargetRoom))
-            {
-                TriggerFireAtRoom(Event.TargetRoom, Event.FireType, Event.InitialIntensity);
-            }
-            else if (IsValid(Event.TargetActor))
-            {
-                TriggerFireAtActor(Event.TargetActor);
-            }
+        PlayerCharacter = PlayerPawn;
 
-            Event.bHasTriggered = true;
-            OnFireEventTriggered.Broadcast(Event.EventID);
-            break;
-        }
+        UE_LOG(LogGameManager, Log, TEXT("[GameManager] Player character found: %s"),
+            *PlayerCharacter->GetName());
+    }
+    else
+    {
+        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Player pawn not found"));
     }
 }
 
-void AGameManager::TriggerFireAtRoom(ARoomActor* Room, ECombustibleType FireType, float Intensity)
+void AGameManager::FindSceneActors()
 {
-    if (!IsValid(Room))
-        return;
-
-    // 방 안의 랜덤 Combustible 점화
-    AFireActor* Fire = Room->IgniteRandomCombustibleInRoom(true);
-
-    if (IsValid(Fire))
-    {
-        Fire->BaseIntensity = Intensity;
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Fire ignited in room: %s"),
-            *Room->GetName());
-    }
-}
-
-void AGameManager::TriggerFireAtActor(AActor* TargetActor)
-{
-    if (!IsValid(TargetActor))
-        return;
-
-    UCombustibleComponent* Comb = TargetActor->FindComponentByClass<UCombustibleComponent>();
-    if (IsValid(Comb))
-    {
-        Comb->ForceIgnite(true);
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Fire ignited at actor: %s"),
-            *TargetActor->GetName());
-    }
-}
-
-int32 AGameManager::GetActiveFireCount() const
-{
-    int32 TotalFires = 0;
-
-    UWorld* World = GetWorld();
-    if (!World)
-        return 0;
-
-    for (TActorIterator<ARoomActor> It(World); It; ++It)
+    // Room 액터들 찾아서 이벤트 바인딩
+    for (TActorIterator<ARoomActor> It(GetWorld()); It; ++It)
     {
         ARoomActor* Room = *It;
         if (IsValid(Room))
         {
-            TotalFires += Room->GetActiveFireCount();
+            BindRoomActorEvents(Room);
+
+            // PotentialFireRooms가 비어있으면 자동으로 추가
+            if (PotentialFireRooms.Num() == 0)
+            {
+                PotentialFireRooms.Add(Room);
+            }
         }
     }
 
-    return TotalFires;
-}
-
-TArray<AFireActor*> AGameManager::GetAllActiveFires() const
-{
-    TArray<AFireActor*> Fires;
-
-    UWorld* World = GetWorld();
-    if (!World)
-        return Fires;
-
-    for (TActorIterator<AFireActor> It(World); It; ++It)
+    // 기존 Fire 액터들 찾아서 이벤트 바인딩
+    for (TActorIterator<AFireActor> It(GetWorld()); It; ++It)
     {
         AFireActor* Fire = *It;
         if (IsValid(Fire))
         {
-            Fires.Add(Fire);
+            BindFireActorEvents(Fire);
         }
     }
 
-    return Fires;
-}
+    // NPC 찾기 (태그로 찾기)
+    TArray<AActor*> FoundNPCs;
+    UGameplayStatics::GetAllActorsWithTag(GetWorld(), FName("NPC"), FoundNPCs);
 
-// ============================ NPC 구조 시스템 ============================
-
-void AGameManager::UpdateNPCDanger(float DeltaTime)
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (FNPCRescueData& NPC : ChapterData.NPCsToRescue)
+    for (AActor* NPC : FoundNPCs)
     {
-        if (NPC.bIsRescued || NPC.bIsDead)
-            continue;
-
-        ARoomActor* Room = NPC.InitialRoom;
-        if (!IsValid(Room))
-            continue;
-
-        // 위험한 환경인지 체크
-        const bool bInDanger = (Room->State == ERoomState::Fire || Room->State == ERoomState::Risk);
-
-        if (bInDanger)
+        if (IsValid(NPC))
         {
-            NPC.TimeInDanger += DeltaTime;
-
-            // 생존 시간 초과 시 사망
-            if (NPC.TimeInDanger >= NPC.MaxSurvivalTime)
-            {
-                KillNPC(NPC.NPCID, TEXT("화재 노출 시간 초과"));
-            }
-        }
-    }
-}
-
-void AGameManager::RescueNPC(const FString& NPCID)
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (FNPCRescueData& NPC : ChapterData.NPCsToRescue)
-    {
-        if (NPC.NPCID == NPCID && !NPC.bIsRescued && !NPC.bIsDead)
-        {
-            NPC.bIsRescued = true;
-
-            CurrentSessionStats.TotalNPCsRescued++;
-            OnNPCRescued.Broadcast(NPC.NPCID, NPC.NPCName);
-
-            UE_LOG(LogGameManager, Warning, TEXT("[GameManager] NPC rescued: %s"),
-                *NPC.NPCName.ToString());
-
-            // 점수 추가
-            AddScore(200);
-
-            break;
-        }
-    }
-}
-
-void AGameManager::KillNPC(const FString& NPCID, const FString& Reason)
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (FNPCRescueData& NPC : ChapterData.NPCsToRescue)
-    {
-        if (NPC.NPCID == NPCID && !NPC.bIsDead)
-        {
-            NPC.bIsDead = true;
-
-            OnNPCDied.Broadcast(NPC.NPCID, NPC.NPCName);
-
-            UE_LOG(LogGameManager, Error, TEXT("[GameManager] NPC died: %s - Reason: %s"),
-                *NPC.NPCName.ToString(), *Reason);
-
-            // 점수 감점
-            SubtractScore(300);
-
-            break;
-        }
-    }
-}
-
-int32 AGameManager::GetRescuedNPCCount() const
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return 0;
-
-    const FChapterData& ChapterData = Chapters[CurrentChapterID];
-    int32 Count = 0;
-
-    for (const FNPCRescueData& NPC : ChapterData.NPCsToRescue)
-    {
-        if (NPC.bIsRescued)
-        {
-            Count++;
+            RegisterNPC(NPC);
         }
     }
 
-    return Count;
-}
-
-int32 AGameManager::GetTotalNPCCount() const
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return 0;
-
-    return Chapters[CurrentChapterID].NPCsToRescue.Num();
-}
-
-TArray<FNPCRescueData> AGameManager::GetNPCsInDanger() const
-{
-    TArray<FNPCRescueData> Result;
-
-    if (!Chapters.Contains(CurrentChapterID))
-        return Result;
-
-    const FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (const FNPCRescueData& NPC : ChapterData.NPCsToRescue)
-    {
-        if (!NPC.bIsRescued && !NPC.bIsDead)
-        {
-            ARoomActor* Room = NPC.InitialRoom;
-            if (IsValid(Room) && (Room->State == ERoomState::Fire || Room->State == ERoomState::Risk))
-            {
-                Result.Add(NPC);
-            }
-        }
-    }
-
-    return Result;
-}
-
-// ============================ 통계 ============================
-
-void AGameManager::ResetSessionStatistics()
-{
-    CurrentSessionStats = FGameStatistics();
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Session statistics reset"));
-}
-
-// ============================ 이벤트 리스닝 ============================
-
-void AGameManager::OnFireExtinguished(AFireActor* Fire)
-{
-    CurrentSessionStats.TotalFiresExtinguished++;
-
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Fire extinguished - Total: %d"),
-        CurrentSessionStats.TotalFiresExtinguished);
-}
-
-void AGameManager::OnBackdraftTriggered()
-{
-    CurrentSessionStats.TotalBackdraftsTriggered++;
-
-    UE_LOG(LogGameManager, Error, TEXT("[GameManager] BACKDRAFT! Total: %d"),
-        CurrentSessionStats.TotalBackdraftsTriggered);
-}
-
-void AGameManager::OnGasTankBLEVE(FVector Location)
-{
-    CurrentSessionStats.TotalGasTanksExploded++;
-
-    UE_LOG(LogGameManager, Error, TEXT("[GameManager] GAS TANK EXPLOSION at %s! Total: %d"),
-        *Location.ToString(), CurrentSessionStats.TotalGasTanksExploded);
-}
-
-void AGameManager::OnDoorBreached(ADoorActor* Door)
-{
-    CurrentSessionStats.TotalDoorsBreached++;
-
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Door breached: %s - Total: %d"),
-        *GetNameSafe(Door), CurrentSessionStats.TotalDoorsBreached);
-}
-
-void AGameManager::OnVentHoleCreated(int32 HoleCount)
-{
-    CurrentSessionStats.TotalVentHolesCreated++;
-
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] VentHole created (Total holes: %d) - Events: %d"),
-        HoleCount, CurrentSessionStats.TotalVentHolesCreated);
-}
-
-void AGameManager::OnPlayerDeath()
-{
-    UE_LOG(LogGameManager, Error, TEXT("[GameManager] PLAYER DEATH!"));
-
-    ChangeGameState(EGameState::MissionFailed);
-}
-
-void AGameManager::OnWaterUsed(float Amount)
-{
-    CurrentSessionStats.TotalWaterUsed += Amount;
-}
-
-// ============================ 저장/로드 ============================
-
-void AGameManager::SaveGameProgress()
-{
-    // TODO: SaveGame 시스템 구현
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Game progress saved"));
-}
-
-void AGameManager::LoadGameProgress()
-{
-    // TODO: SaveGame 시스템 구현
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Game progress loaded"));
+    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Scene actors found - Rooms: %d, NPCs: %d"),
+        PotentialFireRooms.Num(), NPCsToRescue.Num());
 }
 
 // ============================ 유틸리티 ============================
 
-float AGameManager::GetChapterElapsedTime() const
+float AGameManager::GetElapsedGameTime() const
 {
-    return ChapterElapsedTime;
+    if (GameStartTime <= 0.f) return 0.f;
+
+    if (CurrentGameState == EGameState::InProgress || CurrentGameState == EGameState::Paused)
+    {
+        return GetWorld()->GetTimeSeconds() - GameStartTime;
+    }
+    else if (CurrentGameState == EGameState::Ended)
+    {
+        return GameEndTime - GameStartTime;
+    }
+
+    return 0.f;
 }
 
-float AGameManager::GetChapterRemainingTime() const
+FString AGameManager::GetGameStateString() const
 {
-    if (!Chapters.Contains(CurrentChapterID))
-        return 0.f;
-
-    const FChapterData& ChapterData = Chapters[CurrentChapterID];
-    if (ChapterData.TimeLimit <= 0.f)
-        return -1.f;
-
-    return FMath::Max(0.f, ChapterData.TimeLimit - ChapterElapsedTime);
+    return UEnum::GetValueAsString(CurrentGameState);
 }
 
-void AGameManager::DebugTriggerAllFireEvents()
+FString AGameManager::GetChapterString() const
 {
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    for (FFireSpawnEvent& Event : ChapterData.FireEvents)
-    {
-        if (!Event.bHasTriggered)
-        {
-            TriggerFireEvent(Event.EventID);
-        }
-    }
-
-    UE_LOG(LogGameManager, Warning, TEXT("[GameManager] DEBUG: All fire events triggered"));
-}
-
-void AGameManager::DebugPrintChapterInfo()
-{
-    if (!Chapters.Contains(CurrentChapterID))
-        return;
-
-    const FChapterData& ChapterData = Chapters[CurrentChapterID];
-
-    UE_LOG(LogGameManager, Warning, TEXT("========== CHAPTER INFO =========="));
-    UE_LOG(LogGameManager, Warning, TEXT("Chapter: %s"), *ChapterData.ChapterTitle.ToString());
-    UE_LOG(LogGameManager, Warning, TEXT("Fire Events: %d"), ChapterData.FireEvents.Num());
-    UE_LOG(LogGameManager, Warning, TEXT("NPCs to Rescue: %d"), ChapterData.NPCsToRescue.Num());
-    UE_LOG(LogGameManager, Warning, TEXT("Objectives: %d"), ChapterData.ChapterObjectives.Num());
-    UE_LOG(LogGameManager, Warning, TEXT("Time Limit: %.1f"), ChapterData.TimeLimit);
-    UE_LOG(LogGameManager, Warning, TEXT("Elapsed Time: %.1f"), ChapterElapsedTime);
-    UE_LOG(LogGameManager, Warning, TEXT("Active Fires: %d"), GetActiveFireCount());
-    UE_LOG(LogGameManager, Warning, TEXT("NPCs Rescued: %d / %d"), GetRescuedNPCCount(), GetTotalNPCCount());
-    UE_LOG(LogGameManager, Warning, TEXT("=================================="));
-}
-
-// ============================ 내부 함수 ============================
-
-void AGameManager::CheckChapterCompletion()
-{
-    if (CurrentGameState != EGameState::Gameplay)
-        return;
-
-    // 필수 목표가 모두 완료되었는지 체크
-    if (AreMandatoryObjectivesComplete())
-    {
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] All mandatory objectives complete!"));
-        ChangeGameState(EGameState::MissionComplete);
-    }
-
-    // 필수 목표 중 실패한 것이 있는지 체크
-    for (const UMissionObjective* Obj : ActiveObjectives)
-    {
-        if (IsValid(Obj) && !Obj->bIsOptional && Obj->IsFailed())
-        {
-            UE_LOG(LogGameManager, Error, TEXT("[GameManager] Mandatory objective failed!"));
-            ChangeGameState(EGameState::MissionFailed);
-            return;
-        }
-    }
-}
-
-void AGameManager::BindGameEvents()
-{
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Binding game events..."));
-
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] BindGameEvents: World is null, skipping event binding"));
-        return;
-    }
-
-    // Room 이벤트
-    for (TActorIterator<ARoomActor> It(World); It; ++It)
-    {
-        ARoomActor* Room = *It;
-        if (IsValid(Room))
-        {
-            // Delegate가 유효한지 체크 후 바인딩
-            if (Room->OnFireExtinguished.IsBound() == false)
-            {
-                Room->OnFireExtinguished.AddDynamic(this, &AGameManager::OnFireExtinguished);
-            }
-            if (Room->OnBackdraft.IsBound() == false)
-            {
-                Room->OnBackdraft.AddUniqueDynamic(this, &AGameManager::OnBackdraftTriggered);
-            }
-        }
-    }
-
-    // GasTank 이벤트
-    for (TActorIterator<AGasTankActor> It(World); It; ++It)
-    {
-        AGasTankActor* Tank = *It;
-        if (IsValid(Tank) && IsValid(Tank->PressureVessel))
-        {
-            if (Tank->PressureVessel->OnBLEVE.IsBound() == false)
-            {
-                Tank->PressureVessel->OnBLEVE.AddDynamic(this, &AGameManager::OnGasTankBLEVE);
-            }
-        }
-    }
-
-    // Door 이벤트
-    for (TActorIterator<ADoorActor> It(World); It; ++It)
-    {
-        ADoorActor* Door = *It;
-        if (IsValid(Door))
-        {
-            if (Door->OnVentHoleCreated.IsBound() == false)
-            {
-                Door->OnVentHoleCreated.AddDynamic(this, &AGameManager::OnVentHoleCreated);
-            }
-        }
-    }
-}
-
-void AGameManager::UnbindGameEvents()
-{
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Unbinding game events..."));
-
-    UWorld* World = GetWorld();
-    if (!World)
-        return;
-
-    for (TActorIterator<ARoomActor> It(World); It; ++It)
-    {
-        ARoomActor* Room = *It;
-        if (IsValid(Room))
-        {
-            Room->OnFireExtinguished.RemoveDynamic(this, &AGameManager::OnFireExtinguished);
-            Room->OnBackdraft.RemoveDynamic(this, &AGameManager::OnBackdraftTriggered);
-        }
-    }
-
-    for (TActorIterator<AGasTankActor> It(World); It; ++It)
-    {
-        AGasTankActor* Tank = *It;
-        if (IsValid(Tank) && IsValid(Tank->PressureVessel))
-        {
-            Tank->PressureVessel->OnBLEVE.RemoveDynamic(this, &AGameManager::OnGasTankBLEVE);
-        }
-    }
-
-    for (TActorIterator<ADoorActor> It(World); It; ++It)
-    {
-        ADoorActor* Door = *It;
-        if (IsValid(Door))
-        {
-            Door->OnVentHoleCreated.RemoveDynamic(this, &AGameManager::OnVentHoleCreated);
-        }
-    }
-}
-
-void AGameManager::InitializeChapters()
-{
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] Initializing chapters..."));
-
-    // BP에서 이미 설정되어 있으면 C++ 초기화 스킵
-    if (Chapters.Num() > 0)
-    {
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] Chapters already initialized in Blueprint, skipping C++ setup"));
-
-        // 첫 챕터는 항상 언락
-        if (Chapters.Contains(EChapterID::Chapter1))
-        {
-            UnlockChapter(EChapterID::Chapter1);
-        }
-        if (Chapters.Contains(EChapterID::Tutorial))
-        {
-            UnlockChapter(EChapterID::Tutorial);
-        }
-
-        return;
-    }
-
-    // BP에 데이터가 없으면 C++에서 기본값 설정
-    UE_LOG(LogGameManager, Log, TEXT("[GameManager] No Blueprint data, using C++ defaults"));
-
-    SetupChapter1();
-    SetupChapter2();
-
-    // 첫 챕터는 항상 언락
-    UnlockChapter(EChapterID::Chapter1);
-    UnlockChapter(EChapterID::Tutorial);
-}
-
-void AGameManager::SetupChapter1()
-{
-    FChapterData Chapter1;
-    Chapter1.ChapterID = EChapterID::Chapter1;
-    Chapter1.ChapterTitle = FText::FromString(TEXT("Chapter 1: Kitchen Fire"));
-    Chapter1.ChapterDescription = FText::FromString(TEXT("Extinguish the kitchen fire and rescue residents"));
-    Chapter1.LevelName = FName(TEXT("Chapter1_Kitchen"));
-
-    Chapter1.IntroText = FText::FromString(TEXT("A fire has broken out in the kitchen.\nExtinguish all fires and evacuate residents."));
-    Chapter1.SuccessOutroText = FText::FromString(TEXT("Excellent! All residents evacuated safely."));
-    Chapter1.FailureOutroText = FText::FromString(TEXT("Mission failed. Be more careful."));
-    Chapter1.IntroDuration = 5.f;
-
-    // 화재 시나리오 - 스크립트 방식
-    Chapter1.ScenarioType = EFireScenarioType::Scripted;
-
-    // 화재 이벤트 1: 시작 시 주방에서 발생
-    FFireSpawnEvent Event1;
-    Event1.TriggerTime = 0.f;
-    Event1.FireType = ECombustibleType::Oil;
-    Event1.InitialIntensity = 1.0f;
-    Event1.EventID = TEXT("Kitchen_Initial_Fire");
-    Chapter1.FireEvents.Add(Event1);
-
-    // 화재 이벤트 2: 30초 후 거실로 확산
-    FFireSpawnEvent Event2;
-    Event2.TriggerTime = 30.f;
-    Event2.FireType = ECombustibleType::Normal;
-    Event2.InitialIntensity = 0.8f;
-    Event2.EventID = TEXT("LivingRoom_Spread");
-    Chapter1.FireEvents.Add(Event2);
-
-    // 화재 이벤트 3: 60초 후 전기 패널
-    FFireSpawnEvent Event3;
-    Event3.TriggerTime = 60.f;
-    Event3.FireType = ECombustibleType::Electric;
-    Event3.InitialIntensity = 1.2f;
-    Event3.EventID = TEXT("Electric_Panel_Fire");
-    Chapter1.FireEvents.Add(Event3);
-
-    // NPC 구조
-    FNPCRescueData NPC1;
-    NPC1.NPCName = FText::FromString(TEXT("Kim Chulsoo"));
-    NPC1.MaxSurvivalTime = 180.f;
-    Chapter1.NPCsToRescue.Add(NPC1);
-
-    FNPCRescueData NPC2;
-    NPC2.NPCName = FText::FromString(TEXT("Park Younghee"));
-    NPC2.MaxSurvivalTime = 180.f;
-    Chapter1.NPCsToRescue.Add(NPC2);
-
-    Chapter1.MinNPCRescueRequired = 2;
-
-    // 목표 (블루프린트에서 설정 가능하도록 비워둠)
-    Chapter1.TimeLimit = 300.f; // 5분
-    Chapter1.TargetScore = 1000;
-
-    Chapters.Add(EChapterID::Chapter1, Chapter1);
-}
-
-void AGameManager::SetupChapter2()
-{
-    FChapterData Chapter2;
-    Chapter2.ChapterID = EChapterID::Chapter2;
-    Chapter2.ChapterTitle = FText::FromString(TEXT("Chapter 2: Industrial Facility"));
-    Chapter2.ChapterDescription = FText::FromString(TEXT("Stop the fire and prevent gas tank explosion"));
-    Chapter2.LevelName = FName(TEXT("Chapter2_Industrial"));
-
-    Chapter2.IntroText = FText::FromString(TEXT("A major fire broke out at industrial facility.\nPrevent gas tank explosion and rescue workers."));
-    Chapter2.SuccessOutroText = FText::FromString(TEXT("Crisis averted! Explosion prevented."));
-    Chapter2.FailureOutroText = FText::FromString(TEXT("Explosion occurred. Respond faster."));
-    Chapter2.IntroDuration = 5.f;
-
-    // 화재 시나리오 - 점진적 방식
-    Chapter2.ScenarioType = EFireScenarioType::Progressive;
-
-    // 화재 이벤트 1: 시작 시 창고
-    FFireSpawnEvent Event1;
-    Event1.TriggerTime = 0.f;
-    Event1.FireType = ECombustibleType::Normal;
-    Event1.InitialIntensity = 1.5f;
-    Event1.EventID = TEXT("Warehouse_Initial");
-    Chapter2.FireEvents.Add(Event1);
-
-    // 화재 이벤트 2: 20초 후 유류 저장소
-    FFireSpawnEvent Event2;
-    Event2.TriggerTime = 20.f;
-    Event2.FireType = ECombustibleType::Oil;
-    Event2.InitialIntensity = 2.0f;
-    Event2.EventID = TEXT("Oil_Storage_Fire");
-    Chapter2.FireEvents.Add(Event2);
-
-    // 화재 이벤트 3: 45초 후 가스탱크 근처
-    FFireSpawnEvent Event3;
-    Event3.TriggerTime = 45.f;
-    Event3.FireType = ECombustibleType::Explosive;
-    Event3.InitialIntensity = 1.8f;
-    Event3.EventID = TEXT("GasTank_Proximity");
-    Chapter2.FireEvents.Add(Event3);
-
-    // NPC 구조
-    FNPCRescueData NPC1;
-    NPC1.NPCName = FText::FromString(TEXT("Worker A"));
-    NPC1.MaxSurvivalTime = 240.f;
-    Chapter2.NPCsToRescue.Add(NPC1);
-
-    FNPCRescueData NPC2;
-    NPC2.NPCName = FText::FromString(TEXT("Worker B"));
-    NPC2.MaxSurvivalTime = 240.f;
-    Chapter2.NPCsToRescue.Add(NPC2);
-
-    FNPCRescueData NPC3;
-    NPC3.NPCName = FText::FromString(TEXT("Worker C"));
-    NPC3.MaxSurvivalTime = 240.f;
-    Chapter2.NPCsToRescue.Add(NPC3);
-
-    Chapter2.MinNPCRescueRequired = 3;
-
-    Chapter2.TimeLimit = 420.f; // 7분
-    Chapter2.TargetScore = 1500;
-    Chapter2.bIsUnlocked = false; // 1장 클리어 후 언락
-
-    Chapters.Add(EChapterID::Chapter2, Chapter2);
+    return UEnum::GetValueAsString(CurrentChapter);
 }

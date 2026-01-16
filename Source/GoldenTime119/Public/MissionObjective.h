@@ -30,6 +30,7 @@ enum class EMissionObjectiveType : uint8
     OpenVentHolesInDoor         UMETA(DisplayName = "문에 환기구 만들기"),
     BreachDoor                  UMETA(DisplayName = "문 파괴"),
     RescueNPC                   UMETA(DisplayName = "NPC 구조"),
+    EscapeToExitPoint           UMETA(DisplayName = "탈출 지점 도달"),
 
     // 제한 시간
     CompleteBeforeTime          UMETA(DisplayName = "제한 시간 내 완료"),
@@ -126,6 +127,30 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Objective|Target")
     TArray<AActor*> TargetActors;
 
+    // ============================ NPC 구조 관련 ============================
+
+    // 구조할 NPC 목록
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Objective|Rescue")
+    TArray<AActor*> TargetNPCs;
+
+    // 구조된 NPC 수
+    UPROPERTY(BlueprintReadOnly, Category = "Objective|Rescue")
+    int32 RescuedNPCCount = 0;
+
+    // ============================ 탈출 관련 ============================
+
+    // 탈출 지점 액터
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Objective|Escape")
+    AActor* ExitPoint;
+
+    // 탈출 완료 거리
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Objective|Escape")
+    float ExitReachDistance = 200.f;
+
+    // 거리 진행도 계산용 최대 거리
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Objective|Escape")
+    float MaxDistanceForProgress = 5000.f;
+
     // ============================ 조건 검사 ============================
 
     // 실패 조건 활성화 여부
@@ -191,6 +216,28 @@ public:
     UFUNCTION(BlueprintPure, Category = "Objective")
     float GetRemainingTime(UWorld* World) const;
 
+    // ============================ 외부 이벤트 등록 메서드 ============================
+
+    // NPC가 구조되었을 때 호출
+    UFUNCTION(BlueprintCallable, Category = "Objective")
+    void NotifyNPCRescued(AActor* RescuedNPC);
+
+    // 백드래프트 발생 시 호출
+    UFUNCTION(BlueprintCallable, Category = "Objective")
+    void NotifyBackdraftOccurred();
+
+    // 화재 진압 시 호출
+    UFUNCTION(BlueprintCallable, Category = "Objective")
+    void NotifyFireExtinguished();
+
+    // 가스탱크 폭발 시 호출
+    UFUNCTION(BlueprintCallable, Category = "Objective")
+    void NotifyGasTankExplosion();
+
+    // 플레이어 사망 시 호출
+    UFUNCTION(BlueprintCallable, Category = "Objective")
+    void NotifyPlayerDeath();
+
 protected:
     // 타입별 진행도 체크 함수들
     void CheckExtinguishAllFires(UWorld* World);
@@ -206,6 +253,8 @@ protected:
     void CheckOpenVentHolesInDoor(UWorld* World);
     void CheckBreachDoor(UWorld* World);
     void CheckCompleteBeforeTime(UWorld* World);
+    void CheckRescueNPC(UWorld* World);
+    void CheckEscapeToExitPoint(UWorld* World);
 
     // 헬퍼 함수
     void UpdateProgressValue(float NewProgress, const FString& ProgressText);

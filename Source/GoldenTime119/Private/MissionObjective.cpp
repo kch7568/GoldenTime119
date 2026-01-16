@@ -1,4 +1,3 @@
-// ============================ MissionObjective.cpp ============================
 #include "MissionObjective.h"
 #include "FireActor.h"
 #include "DoorActor.h"
@@ -29,6 +28,7 @@ void UMissionObjective::StartObjective(UWorld* World)
     StartTime = World->GetTimeSeconds();
     Progress01 = 0.f;
     CurrentCount = 0;
+    RescuedNPCCount = 0;
 
     ChangeStatus(EMissionObjectiveStatus::InProgress);
 
@@ -107,6 +107,14 @@ void UMissionObjective::UpdateProgress(float DeltaSeconds, UWorld* World)
         CheckCompleteBeforeTime(World);
         break;
 
+    case EMissionObjectiveType::RescueNPC:
+        CheckRescueNPC(World);
+        break;
+
+    case EMissionObjectiveType::EscapeToExitPoint:
+        CheckEscapeToExitPoint(World);
+        break;
+
     default:
         break;
     }
@@ -145,6 +153,7 @@ void UMissionObjective::ResetObjective()
     Status = EMissionObjectiveStatus::NotStarted;
     Progress01 = 0.f;
     CurrentCount = 0;
+    RescuedNPCCount = 0;
     StartTime = 0.f;
     CompletionTime = 0.f;
 }
@@ -156,8 +165,12 @@ FString UMissionObjective::GetProgressText() const
     case EMissionObjectiveType::ExtinguishFireCount:
         return FormatProgressText(CurrentCount, TargetCount);
 
+    case EMissionObjectiveType::RescueNPC:
+        return FormatProgressText(RescuedNPCCount, TargetNPCs.Num());
+
     case EMissionObjectiveType::SurviveForDuration:
     case EMissionObjectiveType::CompleteBeforeTime:
+    case EMissionObjectiveType::PreventBackdraft:
         if (GetWorld())
         {
             const float Remaining = GetRemainingTime(GetWorld());
@@ -167,6 +180,7 @@ FString UMissionObjective::GetProgressText() const
 
     case EMissionObjectiveType::ClearRoomSmoke:
     case EMissionObjectiveType::StabilizeRoomEnvironment:
+    case EMissionObjectiveType::EscapeToExitPoint:
         return FormatPercentText(Progress01);
 
     default:
@@ -187,6 +201,65 @@ float UMissionObjective::GetRemainingTime(UWorld* World) const
     if (DurationSeconds <= 0.f) return 0.f;
     const float Elapsed = GetElapsedTime(World);
     return FMath::Max(0.f, DurationSeconds - Elapsed);
+}
+
+// ============================ 외부 이벤트 등록 메서드 ============================
+
+void UMissionObjective::NotifyNPCRescued(AActor* RescuedNPC)
+{
+    if (!IsValid(RescuedNPC)) return;
+    if (!TargetNPCs.Contains(RescuedNPC)) return;
+    if (Status != EMissionObjectiveStatus::InProgress) return;
+
+    RescuedNPCCount++;
+
+    UE_LOG(LogMissionObjective, Warning, TEXT("[Objective] NPC Rescued: %d/%d"),
+        RescuedNPCCount, TargetNPCs.Num());
+
+    // 즉시 진행도 업데이트
+    if (ObjectiveType == EMissionObjectiveType::RescueNPC)
+    {
+        CheckRescueNPC(GetWorld());
+    }
+}
+
+void UMissionObjective::NotifyBackdraftOccurred()
+{
+    if (bFailOnBackdraft && Status == EMissionObjectiveStatus::InProgress)
+    {
+        FailObjective(TEXT("Backdraft occurred"));
+    }
+}
+
+void UMissionObjective::NotifyFireExtinguished()
+{
+    if (Status != EMissionObjectiveStatus::InProgress) return;
+
+    CurrentCount++;
+
+    UE_LOG(LogMissionObjective, Log, TEXT("[Objective] Fire Extinguished: %d"), CurrentCount);
+
+    // 즉시 진행도 업데이트
+    if (ObjectiveType == EMissionObjectiveType::ExtinguishFireCount)
+    {
+        CheckExtinguishFireCount(GetWorld());
+    }
+}
+
+void UMissionObjective::NotifyGasTankExplosion()
+{
+    if (bFailOnGasTankExplosion && Status == EMissionObjectiveStatus::InProgress)
+    {
+        FailObjective(TEXT("Gas tank exploded"));
+    }
+}
+
+void UMissionObjective::NotifyPlayerDeath()
+{
+    if (bFailOnPlayerDeath && Status == EMissionObjectiveStatus::InProgress)
+    {
+        FailObjective(TEXT("Player died"));
+    }
 }
 
 // ============================ 타입별 체크 함수들 ============================
@@ -251,8 +324,7 @@ void UMissionObjective::CheckExtinguishFiresInRoom(UWorld* World)
 
 void UMissionObjective::CheckExtinguishFireCount(UWorld* World)
 {
-    // CurrentCount는 외부에서 증가시킨다고 가정
-    // (FireActor::Extinguish 이벤트 리스닝 필요)
+    // CurrentCount는 NotifyFireExtinguished()에서 증가
 
     if (CurrentCount >= TargetCount)
     {
@@ -345,7 +417,7 @@ void UMissionObjective::CheckStabilizeRoomEnvironment(UWorld* World)
 
 void UMissionObjective::CheckPreventBackdraft(UWorld* World)
 {
-    // 백드래프트 발생 시 외부에서 FailObjective 호출
+    // 백드래프트 발생 시 NotifyBackdraftOccurred() 호출로 실패 처리
     // 시간이 지나면 성공
     const float Elapsed = GetElapsedTime(World);
 
@@ -444,7 +516,7 @@ void UMissionObjective::CheckKeepOxygenAbove(UWorld* World)
 
 void UMissionObjective::CheckPreventGasTankExplosion(UWorld* World)
 {
-    // 가스탱크 BLEVE 발생 시 외부에서 FailObjective 호출
+    // 가스탱크 BLEVE 발생 시 NotifyGasTankExplosion() 호출로 실패 처리
     // 모든 타겟 가스탱크가 안전하면 성공
 
     bool bAllSafe = true;
@@ -533,6 +605,58 @@ void UMissionObjective::CheckCompleteBeforeTime(UWorld* World)
     if (Remaining <= 0.f)
     {
         FailObjective(TEXT("Time limit exceeded"));
+    }
+}
+
+void UMissionObjective::CheckRescueNPC(UWorld* World)
+{
+    // RescuedNPCCount는 NotifyNPCRescued()에서 증가
+    const int32 TotalNPCs = TargetNPCs.Num();
+
+    if (TotalNPCs == 0)
+    {
+        UE_LOG(LogMissionObjective, Warning, TEXT("[Objective] No target NPCs set for rescue objective"));
+        return;
+    }
+
+    if (RescuedNPCCount >= TotalNPCs)
+    {
+        CompleteObjective();
+    }
+    else
+    {
+        const float Prog = (float)RescuedNPCCount / (float)TotalNPCs;
+        UpdateProgressValue(Prog, FormatProgressText(RescuedNPCCount, TotalNPCs));
+    }
+}
+
+void UMissionObjective::CheckEscapeToExitPoint(UWorld* World)
+{
+    if (!IsValid(ExitPoint))
+    {
+        UE_LOG(LogMissionObjective, Warning, TEXT("[Objective] No exit point set for escape objective"));
+        return;
+    }
+
+    APlayerController* PC = World->GetFirstPlayerController();
+    if (!PC) return;
+
+    APawn* PlayerPawn = PC->GetPawn();
+    if (!IsValid(PlayerPawn)) return;
+
+    // 플레이어와 탈출구 거리 체크
+    const float Distance = FVector::Dist(PlayerPawn->GetActorLocation(), ExitPoint->GetActorLocation());
+
+    if (Distance <= ExitReachDistance)
+    {
+        CompleteObjective();
+    }
+    else
+    {
+        // 거리 기반 진행도 (가까워질수록 증가)
+        // 최대 거리에서 0%, 탈출 지점에 가까워질수록 100%로 증가
+        const float Prog = FMath::Clamp(1.f - (Distance / MaxDistanceForProgress), 0.f, 0.95f);
+        UpdateProgressValue(Prog, FString::Printf(TEXT("%.1fm to exit"), Distance / 100.f));
     }
 }
 
