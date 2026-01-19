@@ -266,6 +266,14 @@ void AFireActor::SpreadPressureToNeighbors()
         if (!IsValid(C) || C->IsBurning())
             continue;
 
+        // ★ 핵심: 같은 방 소속인지 확인
+        if (C->GetOwningRoom() != LinkedRoom)
+        {
+            UE_LOG(LogFireActor, Verbose, TEXT("[Fire] Skip spread to %s (different room)"),
+                *GetNameSafe(C->GetOwner()));
+            continue;
+        }
+
         const FVector P0 = GetOwnerCenterFromComb(C);
         const float Dist = FVector::Dist(P0, Origin);
         if (Dist > Radius)

@@ -410,16 +410,23 @@ void AGameManager::CreateFireAtRandomLocation()
 
 void AGameManager::CreateFireInRoom(ARoomActor* Room)
 {
-    if (!IsValid(Room)) return;
+    if (!IsValid(Room))
+    {
+        UE_LOG(LogGameManager, Error, TEXT("[GM] CreateFireInRoom: Room is NULL!"));
+        return;
+    }
+    UE_LOG(LogGameManager, Warning, TEXT("[GM] CreateFireInRoom: %s"), *Room->GetName());
 
     // RoomActor가 이미 등록한 가연물 목록 사용
     TArray<UCombustibleComponent*> Combustibles;
     Room->GetCombustiblesInRoom(Combustibles, true); // true = 이미 타고 있는 것 제외
 
+    UE_LOG(LogGameManager, Warning, TEXT("[GM] Found %d combustibles in %s"),
+        Combustibles.Num(), *Room->GetName());
+
     if (Combustibles.Num() == 0)
     {
-        UE_LOG(LogGameManager, Warning, TEXT("[GameManager] No combustibles found in room %s"),
-            *Room->GetName());
+        UE_LOG(LogGameManager, Error, TEXT("[GM] NO COMBUSTIBLES! Cannot ignite."));
         return;
     }
 

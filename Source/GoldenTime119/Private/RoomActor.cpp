@@ -100,7 +100,7 @@ void ARoomActor::BeginPlay()
 
     EnsureRoomBoundsAndBindOverlap();
 
-    Debug_RescanCombustibles();
+    //Debug_RescanCombustibles();
     UpdateRoomGeometryFromBounds();
 
     // ===== NeutralPlane init =====
@@ -406,8 +406,17 @@ void ARoomActor::RelaxEnv(float DeltaSeconds)
 void ARoomActor::RegisterCombustible(UCombustibleComponent* Comb)
 {
     if (!IsValid(Comb)) return;
+
+    // 이 방의 Set에 추가 (TSet이라 중복은 무시됨)
     Combustibles.Add(Comb);
-    Comb->SetOwningRoom(this);
+
+    // OwningRoom이 없을 때만 설정 (최초 등록한 방이 소유)
+    if (!Comb->GetOwningRoom())
+    {
+        Comb->SetOwningRoom(this);
+        UE_LOG(LogRoomActor, Log, TEXT("[Room] %s registered to %s (first owner)"),
+            *GetNameSafe(Comb->GetOwner()), *GetName());
+    }
 }
 
 void ARoomActor::UnregisterCombustible(UCombustibleComponent* Comb)
@@ -457,6 +466,11 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
     AActor* OwnerActor = Comb->GetOwner();
     if (!IsValid(OwnerActor)) return nullptr;
 
+    UE_LOG(LogRoomActor, Error, TEXT("[Room] SpawnFire called on Room:%s for Target:%s (CombOwner:%s)"),
+        *GetName(),
+        *GetNameSafe(OwnerActor),
+        Comb->GetOwningRoom() ? *Comb->GetOwningRoom()->GetName() : TEXT("NULL"));
+
     Comb->EnsureFuelInitialized();
 
     if (!FireClass)
@@ -505,18 +519,31 @@ AFireActor* ARoomActor::SpawnFireForCombustible(UCombustibleComponent* Comb, ECo
 void ARoomActor::GetCombustiblesInRoom(TArray<UCombustibleComponent*>& Out, bool bExcludeBurning) const
 {
     Out.Reset();
+
     for (const TWeakObjectPtr<UCombustibleComponent>& W : Combustibles)
     {
         UCombustibleComponent* C = W.Get();
         if (!IsValid(C)) continue;
         if (bExcludeBurning && C->IsBurning()) continue;
+
+        if (C->GetOwningRoom() != this) continue;
+
         Out.Add(C);
     }
+
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] GetCombustiblesInRoom: %s | Count: %d"),
+        *GetName(), Out.Num());
 }
 
 void ARoomActor::Debug_RescanCombustibles()
 {
     if (!GetWorld() || !IsValid(RoomBounds)) return;
+
+    // RoomBounds 정보 출력
+    FVector Center = RoomBounds->GetComponentLocation();
+    FVector Extent = RoomBounds->GetScaledBoxExtent();
+    UE_LOG(LogRoomActor, Warning, TEXT("[Room] %s Bounds Center:%s Extent:%s"),
+        *GetName(), *Center.ToString(), *Extent.ToString());
 
     int32 Added = 0;
 
@@ -526,15 +553,30 @@ void ARoomActor::Debug_RescanCombustibles()
         if (!IsValid(A)) continue;
 
         const FVector Pos = GetActorCenter(A);
-        if (!IsInsideRoomBox(RoomBounds, Pos))
-            continue;
 
         UCombustibleComponent* Comb = A->FindComponentByClass<UCombustibleComponent>();
         if (!Comb) continue;
 
+        // 각 가연물 위치와 Inside 결과 출력
+        bool bInside = IsInsideRoomBox(RoomBounds, Pos);
+        UE_LOG(LogRoomActor, Warning, TEXT("[Room] %s checking %s at %s -> Inside:%d"),
+            *GetName(), *GetNameSafe(A), *Pos.ToString(), bInside);
+
+        if (!bInside)
+            continue;
+
+        if (Comb->GetOwningRoom() && Comb->GetOwningRoom() != this)
+            continue;
+
         if (!Combustibles.Contains(Comb))
         {
-            RegisterCombustible(Comb);
+            Combustibles.Add(Comb);
+
+            if (!Comb->GetOwningRoom())
+            {
+                Comb->SetOwningRoom(this);
+            }
+
             Added++;
         }
     }
@@ -590,11 +632,19 @@ void ARoomActor::UpdateRoomState()
 bool ARoomActor::IsInsideRoomBox(const UBoxComponent* Box, const FVector& WorldPos)
 {
     if (!Box) return false;
+
     const FVector Local = Box->GetComponentTransform().InverseTransformPosition(WorldPos);
     const FVector Extent = Box->GetScaledBoxExtent();
-    return FMath::Abs(Local.X) <= Extent.X
+
+    bool bInside = FMath::Abs(Local.X) <= Extent.X
         && FMath::Abs(Local.Y) <= Extent.Y
         && FMath::Abs(Local.Z) <= Extent.Z;
+
+    // 디버그
+    UE_LOG(LogRoomActor, Warning, TEXT("[IsInside] WorldPos:%s -> Local:%s | Extent:%s | Result:%d"),
+        *WorldPos.ToString(), *Local.ToString(), *Extent.ToString(), bInside);
+
+    return bInside;
 }
 
 void ARoomActor::UpdateRoomGeometryFromBounds()
@@ -941,7 +991,7 @@ void ARoomActor::EvaluateBackdraftArming(float DeltaSeconds)
 
     const bool bSealedNow = (NP.Vent01 <= SealEpsilonVent01);
 
-    // ★ 디버그 로그 추가
+    // 디버그 로그 추가
     UE_LOG(LogRoomActor, Warning, TEXT("[Backdraft] Eval - Sealed:%d Vent:%.3f SealedTime:%.2f / %.2f"),
         bSealedNow, NP.Vent01, SealedTime, Backdraft.ArmedHoldSeconds);
 
