@@ -6,12 +6,17 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
+#include "TimerManager.h"
+
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/DecalComponent.h"
+#include "Components/AudioComponent.h"
 
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/ParticleSystem.h"
+
+#include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDoorActor, Log, All);
 
@@ -56,9 +61,10 @@ void ADoorActor::BeginPlay()
     // Room 등록
     SyncRoomRegistration(true);
 
-    // VFX
+    // VFX / Audio
     EnsureDoorVfx();
     BindRoomSignals(true);
+    EnsureDoorAudio();
 
     if (DoorState != EDoorState::Closed)
         NotifyRoomsDoorOpenedOrBreached();
@@ -72,6 +78,7 @@ void ADoorActor::BeginPlay()
 void ADoorActor::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+
     // 문이 잡힌 상태일 때만 업데이트 함수 실행
     if (bIsGrabbed)
     {
@@ -119,6 +126,9 @@ void ADoorActor::Tick(float DeltaSeconds)
     // VFX update
     UpdateDoorVfx(DeltaSeconds);
 
+    // 백드래프트 준비 루프 오디오 업데이트
+    UpdateBackdraftAudio(DeltaSeconds);
+
     // Visual apply
     ApplyDoorVisual(DeltaSeconds);
 }
@@ -126,7 +136,10 @@ void ADoorActor::Tick(float DeltaSeconds)
 void ADoorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     // 타이머 정리
-    GetWorld()->GetTimerManager().ClearTimer(BackdraftDelayTimer);
+    if (GetWorld())
+    {
+        GetWorld()->GetTimerManager().ClearTimer(BackdraftDelayTimer);
+    }
 
     BindRoomSignals(false);
     SyncRoomRegistration(false);
@@ -617,10 +630,9 @@ void ADoorActor::SetBreached()
 
     NotifyRoomsDoorOpenedOrBreached();
 
-    // ★ 환기 구멍이 있으면 백드래프트 약화
+    // 환기 구멍이 있으면 백드래프트 약화 로그
     if (VentHoles.Num() > 0)
     {
-        // 환기 구멍으로 압력이 빠졌으면 백드래프트 강도 감소
         UE_LOG(LogDoorActor, Warning, TEXT("[Door] %s Breached with %d VentHoles - Backdraft may be weakened"),
             *GetName(), VentHoles.Num());
     }
@@ -720,14 +732,18 @@ void ADoorActor::TryTriggerBackdraftIfNeeded(bool bFromBreach)
         *BlastDirection.ToString());
 
     // 1초 후 ExecuteDelayedBackdraft 호출
-    GetWorld()->GetTimerManager().SetTimer(
-        BackdraftDelayTimer,
-        this,
-        &ADoorActor::ExecuteDelayedBackdraft,
-        1.0f,
-        false
-    );
+    if (GetWorld())
+    {
+        GetWorld()->GetTimerManager().SetTimer(
+            BackdraftDelayTimer,
+            this,
+            &ADoorActor::ExecuteDelayedBackdraft,
+            1.0f,
+            false
+        );
+    }
 }
+
 void ADoorActor::ExecuteDelayedBackdraft()
 {
     // 문이 폭발로 날아가기 전에 잡고 있는 손이 있다면 강제 해제
@@ -745,7 +761,15 @@ void ADoorActor::ExecuteDelayedBackdraft()
     UE_LOG(LogDoorActor, Warning, TEXT("[Door] >>> Executing delayed backdraft NOW!"));
 
     PendingBackdraftRoom->TriggerBackdraft(PendingBackdraftDoorTM, PendingBackdraftVentBoost);
-
+    if (BackdraftExplodeSound)
+    {
+        UGameplayStatics::SpawnSoundAtLocation(
+            this,
+            BackdraftExplodeSound,
+            PendingBackdraftDoorTM.GetLocation(),
+            PendingBackdraftDoorTM.GetRotation().Rotator()
+        );
+    }
     // VFX 재생 (문 열린 방향으로)
     if (BackdraftPSC)
     {
@@ -785,6 +809,7 @@ void ADoorActor::ExecuteDelayedBackdraft()
 
     PendingBackdraftRoom = nullptr;
 }
+
 // ============================ Door VFX ============================
 void ADoorActor::EnsureDoorVfx()
 {
@@ -804,6 +829,28 @@ void ADoorActor::EnsureDoorVfx()
         BackdraftPSC->RegisterComponent();
         BackdraftPSC->bAutoActivate = false;
         if (BackdraftTemplate) BackdraftPSC->SetTemplate(BackdraftTemplate);
+    }
+}
+
+void ADoorActor::EnsureDoorAudio()
+{
+    if (!BackdraftReadyAudioComp)
+    {
+        BackdraftReadyAudioComp = NewObject<UAudioComponent>(this, TEXT("BackdraftReadyAudio"));
+        if (BackdraftReadyAudioComp)
+        {
+            BackdraftReadyAudioComp->SetupAttachment(GetRootComponent());
+            BackdraftReadyAudioComp->bAutoActivate = false;
+            BackdraftReadyAudioComp->RegisterComponent();
+
+            if (BackdraftReadyLoopSound)
+            {
+                BackdraftReadyAudioComp->SetSound(BackdraftReadyLoopSound);
+            }
+
+            // 처음에는 볼륨 0으로 (서서히 키울 것)
+            BackdraftReadyAudioComp->SetVolumeMultiplier(0.f);
+        }
     }
 }
 
@@ -934,15 +981,77 @@ void ADoorActor::UpdateDoorVfx(float DeltaSeconds)
         SmokeLeakPSC->DeactivateSystem();
 }
 
+void ADoorActor::UpdateBackdraftAudio(float DeltaSeconds)
+{
+    EnsureDoorAudio();
+    if (!BackdraftReadyAudioComp)
+        return;
+
+    const bool bClosed = (DoorState == EDoorState::Closed);
+
+    const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
+    const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB))
+        ? RoomB->IsBackdraftArmed()
+        : false;
+
+    bool bAnyArmed = bAArmed || bBArmed;
+
+    // Room-To-Room에서 양쪽 모두 Armed면, 실제로는 “서로 막힌 backdraft”라 힌트음 비활성
+    if (LinkType == EDoorLinkType::RoomToRoom && bAArmed && bBArmed)
+    {
+        bAnyArmed = false;
+    }
+
+    // “문이 닫혀 있고, 한쪽 방이 Armed 상태일 때” 힌트 루프
+    const bool bShouldPlayLoop = bClosed && bAnyArmed && (BackdraftReadyLoopSound != nullptr);
+
+    if (bShouldPlayLoop)
+    {
+        if (!BackdraftReadyAudioComp->IsPlaying())
+        {
+            BackdraftReadyAudioComp->Play();
+        }
+    }
+    else
+    {
+        if (BackdraftReadyAudioComp->IsPlaying())
+        {
+            BackdraftReadyAudioComp->FadeOut(0.3f, 0.f);
+        }
+    }
+
+    // Armed 강도(BackdraftPressure)에 비례해서 볼륨 가중
+    const float Pressure = GetBackdraftPressureFromRoom();  // 0~1 정도로 들어온다고 가정
+    const float TargetVolume = bShouldPlayLoop ? FMath::Clamp(Pressure, 0.f, 1.f) : 0.f;
+
+    const float CurrentVolume = BackdraftReadyAudioComp->VolumeMultiplier;
+    const float NewVolume = FMath::FInterpTo(CurrentVolume, TargetVolume, DeltaSeconds, 4.0f);
+
+    BackdraftReadyAudioComp->SetVolumeMultiplier(NewVolume);
+}
+
 void ADoorActor::OnRoomBackdraftTriggered()
 {
     EnsureDoorVfx();
+    EnsureDoorAudio();
 
     const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
     const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB)) ? RoomB->IsBackdraftArmed() : false;
 
     if ((LinkType == EDoorLinkType::RoomToRoom) && bAArmed && bBArmed)
         return;
+
+    // Backdraft 폭발 원샷 사운드
+    if (BackdraftExplodeSound)
+    {
+        UGameplayStatics::PlaySoundAtLocation(this, BackdraftExplodeSound, GetActorLocation());
+    }
+
+    // 준비 루프는 바로 꺼버리기
+    if (BackdraftReadyAudioComp && BackdraftReadyAudioComp->IsPlaying())
+    {
+        BackdraftReadyAudioComp->FadeOut(0.1f, 0.f);
+    }
 
     if (BackdraftPSC)
     {
@@ -956,6 +1065,8 @@ void ADoorActor::OnRoomBackdraftTriggered()
         SetOpenAmount01(1.0f);
     }
 }
+
+// ============================ Grab 인터페이스 ============================
 
 // 문 잡을 수 있는지 여부 확인
 bool ADoorActor::CanBeGrabbed_Implementation() const
@@ -993,6 +1104,7 @@ void ADoorActor::OnReleased_Implementation(USceneComponent* InController, bool b
     GrabbingController = nullptr;
     UE_LOG(LogDoorActor, Log, TEXT("[Door] Released"));
 }
+
 void ADoorActor::UpdateDoorFromController()
 {
     if (!bIsGrabbed || !GrabbingController || !CachedHinge) return;
@@ -1004,7 +1116,6 @@ void ADoorActor::UpdateDoorFromController()
     float CurrentHandYaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
 
     // 2. 초기 각도와 현재 각도의 차이($\Delta$) 계산
-    // FindDeltaAngleDegrees를 써야 180도에서 -180도로 넘어갈 때 문이 튀지 않습니다.
     float YawDelta = FMath::FindDeltaAngleDegrees(InitialHandYaw, CurrentHandYaw);
 
     // 문이 열리는 방향 설정(Positive/Negative)에 따른 보정
