@@ -12,6 +12,9 @@ class UParticleSystem;
 class UParticleSystemComponent;
 class UBreakableComponent;
 class UDecalComponent;
+class UStaticMesh;
+class UAudioComponent;
+class USoundBase;
 
 UENUM(BlueprintType)
 enum class EDoorState : uint8
@@ -335,11 +338,28 @@ private:
 
     FTimerHandle BackdraftDelayTimer;
     FTransform PendingBackdraftDoorTM;
-    float PendingBackdraftVentBoost;
+    float PendingBackdraftVentBoost = 0.f;
     ARoomActor* PendingBackdraftRoom = nullptr;
 
     // 딜레이 후 호출될 함수
     void ExecuteDelayedBackdraft();
+
+    // ===== Backdraft Audio =====
+private:
+    // 백드래프트 준비 상태에서 재생할 루프 사운드
+    UPROPERTY(EditAnywhere, Category = "Door|Backdraft|Audio")
+    TObjectPtr<USoundBase> BackdraftReadyLoopSound = nullptr;
+
+    // 실제 백드래프트 발생 시 재생할 원샷 사운드
+    UPROPERTY(EditAnywhere, Category = "Door|Backdraft|Audio")
+    TObjectPtr<USoundBase> BackdraftExplodeSound = nullptr;
+
+    // 루프용 오디오 컴포넌트
+    UPROPERTY(VisibleAnywhere, Category = "Door|Backdraft|Audio")
+    TObjectPtr<UAudioComponent> BackdraftReadyAudioComp = nullptr;
+
+    void EnsureDoorAudio();
+    void UpdateBackdraftAudio(float DeltaSeconds);
 
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Backdraft")
@@ -358,8 +378,9 @@ public:
     virtual void OnGrabbed_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
     virtual void OnReleased_Implementation(USceneComponent* GrabbingController, bool bIsLeftHand) override;
     virtual bool CanBeGrabbed_Implementation() const override;
+
 protected:
-    // [추가] VR 상호작용 관련 내부 변수
+    // VR 상호작용 관련 내부 변수
     UPROPERTY(VisibleAnywhere, Category = "Door|VR")
     bool bIsGrabbed = false;
 
@@ -369,6 +390,6 @@ protected:
     float InitialHandYaw = 0.f;
     float InitialOpenAmount = 0.f;
 
-    // [추가] 매 프레임 문 각도를 업데이트하는 함수
+    // 매 프레임 문 각도를 업데이트하는 함수
     void UpdateDoorFromController();
 };
