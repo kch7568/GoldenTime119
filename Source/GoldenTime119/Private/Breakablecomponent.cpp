@@ -1,4 +1,4 @@
-// ============================ BreakableComponent.cpp ============================
+// ============================ BreakableComponent.cpp ==========================
 #include "BreakableComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/PrimitiveComponent.h"
@@ -17,6 +17,7 @@ void UBreakableComponent::BeginPlay()
 
     CurrentHP = MaxHP;
     BreakState = EBreakableState::Intact;
+    bHasBroken = false;
 
     UE_LOG(LogBreakable, Log, TEXT("[Breakable] %s initialized - HP:%.1f Material:%d RequiredTool:%d"),
         *GetNameSafe(GetOwner()), MaxHP, (int32)Material, (int32)RequiredTool);
@@ -24,7 +25,7 @@ void UBreakableComponent::BeginPlay()
 
 float UBreakableComponent::ApplyDamage(float BaseDamage, EBreakToolType ToolUsed, FVector HitLocation, FVector HitNormal)
 {
-    if (IsBroken())
+    if (IsBroken() || bHasBroken)
         return 0.f;
 
     // 도구 적합성에 따른 데미지 계산
@@ -48,8 +49,8 @@ float UBreakableComponent::ApplyDamage(float BaseDamage, EBreakToolType ToolUsed
     UE_LOG(LogBreakable, Warning, TEXT("[Breakable] %s hit! Damage:%.1f (Base:%.1f x %.2f) HP:%.1f/%.1f"),
         *GetNameSafe(GetOwner()), FinalDamage, BaseDamage, DamageMultiplier, CurrentHP, MaxHP);
 
-    // 이펙트 재생
-    PlayHitEffects(HitLocation, HitNormal);
+    // 이펙트 재생 (도구 타입 전달)
+    PlayHitEffects(ToolUsed, HitLocation, HitNormal);
 
     // 델리게이트
     OnDamageReceived.Broadcast(FinalDamage, CurrentHP);
@@ -58,7 +59,7 @@ float UBreakableComponent::ApplyDamage(float BaseDamage, EBreakToolType ToolUsed
     UpdateBreakState();
 
     // 파괴 확인
-    if (CurrentHP <= 0.f)
+    if (CurrentHP <= 0.f && !bHasBroken)
     {
         ExecuteBreak(HitLocation);
     }
@@ -140,13 +141,13 @@ void UBreakableComponent::UpdateBreakState()
 
 void UBreakableComponent::SetBreakState(EBreakableState NewState)
 {
-    EBreakableState OldState = BreakState;
+    const EBreakableState OldState = BreakState;
     BreakState = NewState;
 
     UE_LOG(LogBreakable, Warning, TEXT("[Breakable] %s State: %d -> %d (HP: %.1f%%)"),
         *GetNameSafe(GetOwner()), (int32)OldState, (int32)NewState, GetHPRatio() * 100.f);
 
-    // 균열 소리
+    // 균열 소리 (Broken으로 가는 순간은 ExecuteBreak에서 BreakSound 재생하므로 여기선 제외)
     if (NewState == EBreakableState::Damaged || NewState == EBreakableState::HeavyDamaged)
     {
         if (CrackSound)
@@ -160,6 +161,11 @@ void UBreakableComponent::SetBreakState(EBreakableState NewState)
 
 void UBreakableComponent::ExecuteBreak(FVector HitLocation)
 {
+    if (bHasBroken)
+        return;
+
+    bHasBroken = true;
+
     SetBreakState(EBreakableState::Broken);
 
     UE_LOG(LogBreakable, Error, TEXT("[Breakable] ====== %s BROKEN ======"), *GetNameSafe(GetOwner()));
@@ -196,11 +202,28 @@ void UBreakableComponent::ExecuteBreak(FVector HitLocation)
     }
 }
 
-void UBreakableComponent::PlayHitEffects(FVector Location, FVector Normal)
+float UBreakableComponent::GetRandomPitch(float MinPitch, float MaxPitch) const
 {
+    const float SafeMin = FMath::Max(0.01f, MinPitch);
+    const float SafeMax = FMath::Max(SafeMin, MaxPitch);
+    return FMath::FRandRange(SafeMin, SafeMax);
+}
+
+void UBreakableComponent::PlayHitEffects(EBreakToolType ToolUsed, FVector Location, FVector Normal)
+{
+    // ===== Hit one-shot (Axe random pitch) =====
     if (HitSound)
     {
-        UGameplayStatics::PlaySoundAtLocation(this, HitSound, Location);
+        float Pitch = 1.0f;
+
+        const bool bIsAxe = (ToolUsed == EBreakToolType::Axe);
+        if (bIsAxe && bAxeHitOneShotRandomPitch)
+        {
+            Pitch = GetRandomPitch(AxeHitPitchMin, AxeHitPitchMax);
+        }
+
+        // one-shot: SoundWave/SoundCue 자체가 Loop가 아니어야 함
+        UGameplayStatics::PlaySoundAtLocation(this, HitSound, Location, 1.0f, Pitch);
     }
 
     if (HitParticle)
@@ -211,9 +234,16 @@ void UBreakableComponent::PlayHitEffects(FVector Location, FVector Normal)
 
 void UBreakableComponent::PlayBreakEffects(FVector Location)
 {
+    // ===== Break one-shot =====
     if (BreakSound)
     {
-        UGameplayStatics::PlaySoundAtLocation(this, BreakSound, Location);
+        float Pitch = 1.0f;
+        if (bBreakOneShotRandomPitch)
+        {
+            Pitch = GetRandomPitch(BreakPitchMin, BreakPitchMax);
+        }
+
+        UGameplayStatics::PlaySoundAtLocation(this, BreakSound, Location, 1.0f, Pitch);
     }
 
     if (BreakParticle)
@@ -224,8 +254,11 @@ void UBreakableComponent::PlayBreakEffects(FVector Location)
 
 void UBreakableComponent::ForceBreak()
 {
+    if (bHasBroken)
+        return;
+
     CurrentHP = 0.f;
-    ExecuteBreak(GetOwner()->GetActorLocation());
+    ExecuteBreak(GetOwner() ? GetOwner()->GetActorLocation() : FVector::ZeroVector);
 }
 
 float UBreakableComponent::GetHPRatio() const

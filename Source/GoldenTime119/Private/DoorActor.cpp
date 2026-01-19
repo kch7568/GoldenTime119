@@ -1091,6 +1091,8 @@ void ADoorActor::OnGrabbed_Implementation(USceneComponent* InController, bool bI
     // 수학적 각도($atan2$)를 사용하여 초기 Yaw 기록
     InitialHandYaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
 
+    TryPlayGrabFeedback(bIsLeftHand);
+
     // 2. 잡는 순간의 문 열림 수치 기록
     InitialOpenAmount = OpenAmount01;
 
@@ -1129,4 +1131,73 @@ void ADoorActor::UpdateDoorFromController()
 
     // 4. 최종 값 적용 (Clamp는 SetOpenAmount01 내부에서 처리됨)
     SetOpenAmount01(InitialOpenAmount + DeltaAmount);
+}
+
+float ADoorActor::GetRandomPitch(float MinPitch, float MaxPitch) const
+{
+    const float SafeMin = FMath::Max(0.01f, MinPitch);
+    const float SafeMax = FMath::Max(SafeMin, MaxPitch);
+    return FMath::FRandRange(SafeMin, SafeMax);
+}
+
+bool ADoorActor::IsBackdraftDangerOnGrab() const
+{
+    // “Armed”가 더 확실한 트리거면 Armed 우선
+    const bool bAArmed = IsValid(RoomA) ? RoomA->IsBackdraftArmed() : false;
+    const bool bBArmed = (LinkType == EDoorLinkType::RoomToRoom && IsValid(RoomB))
+        ? RoomB->IsBackdraftArmed()
+        : false;
+
+    if (bAArmed || bBArmed)
+        return true;
+
+    // Armed가 아니라도 pressure 기반으로 위험 판단(옵션)
+    const float Pressure = GetBackdraftPressureFromRoom();
+    return Pressure >= MinPressureForGrabWarning;
+}
+
+void ADoorActor::TryPlayGrabFeedback(bool bIsLeftHand)
+{
+    if (!bEnableBackdraftGrabFeedback)
+        return;
+
+    const UWorld* W = GetWorld();
+    if (!W)
+        return;
+
+    const float Now = W->GetTimeSeconds();
+    if ((Now - LastGrabFeedbackTime) < GrabFeedbackCooldown)
+        return;
+
+    if (!IsBackdraftDangerOnGrab())
+        return;
+
+    LastGrabFeedbackTime = Now;
+
+    // 1) Latch one-shot 사운드
+    if (LatchGrabOneShotSound)
+    {
+        float Pitch = 1.0f;
+        if (bLatchGrabRandomPitch)
+        {
+            Pitch = GetRandomPitch(LatchPitchMin, LatchPitchMax);
+        }
+
+        // 손잡이 위치가 있으면 거기, 없으면 문 위치
+        const FVector SfxLoc = CachedDoorMesh ? CachedDoorMesh->GetComponentLocation() : GetActorLocation();
+        UGameplayStatics::PlaySoundAtLocation(this, LatchGrabOneShotSound, SfxLoc, 1.0f, Pitch);
+    }
+
+    // 2) 햅틱(가능한 경우)
+    // - 가장 흔한 경로: PlayerController의 PlayHapticEffect
+    // - VR pawn/hand 시스템이 따로면 거기에 맞게 바꿔 끼우면 됨
+    if (BackdraftGrabHaptic)
+    {
+        APlayerController* PC = W->GetFirstPlayerController();
+        if (PC)
+        {
+            const EControllerHand Hand = bIsLeftHand ? EControllerHand::Left : EControllerHand::Right;
+            PC->PlayHapticEffect(BackdraftGrabHaptic, Hand, BackdraftGrabHapticScale, false);
+        }
+    }
 }

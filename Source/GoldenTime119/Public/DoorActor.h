@@ -234,6 +234,50 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Door|VentHole")
     bool HasVentHoles() const { return VentHoles.Num() > 0; }
 
+    // ===== Grab feedback (Backdraft) =====
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Feedback")
+    bool bEnableBackdraftGrabFeedback = true;
+
+    // 잡는 순간 “위험”으로 판단할 최소 압력
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Feedback", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float MinPressureForGrabWarning = 0.15f;
+
+    // Latch(래치/손잡이) 원샷 사운드
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Audio")
+    TObjectPtr<USoundBase> LatchGrabOneShotSound = nullptr;
+
+    // 랜덤 피치
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Audio")
+    bool bLatchGrabRandomPitch = true;
+
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Audio", meta = (EditCondition = "bLatchGrabRandomPitch", ClampMin = "0.1"))
+    float LatchPitchMin = 0.95f;
+
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Audio", meta = (EditCondition = "bLatchGrabRandomPitch", ClampMin = "0.1"))
+    float LatchPitchMax = 1.05f;
+
+    // 햅틱 에셋(권장). 있으면 PC->PlayHapticEffect로 재생.
+    // (콘텐츠 브라우저에서 HapticFeedbackEffect_Curve/Buffer 생성 가능)
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Haptics")
+    TObjectPtr<class UHapticFeedbackEffect_Base> BackdraftGrabHaptic = nullptr;
+
+    // 햅틱 스케일(강도)
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Haptics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float BackdraftGrabHapticScale = 0.8f;
+
+    // 중복 재생 방지용 쿨다운
+    UPROPERTY(EditAnywhere, Category = "Door|Grab|Feedback", meta = (ClampMin = "0.0"))
+    float GrabFeedbackCooldown = 0.2f;
+
+private:
+    float LastGrabFeedbackTime = -9999.f;
+
+private:
+    void TryPlayGrabFeedback(bool bIsLeftHand);
+    float GetRandomPitch(float MinPitch, float MaxPitch) const;
+    bool IsBackdraftDangerOnGrab() const;
+
+
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;

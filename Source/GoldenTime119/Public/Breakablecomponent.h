@@ -3,6 +3,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Sound/SoundBase.h"
+#include "Particles/ParticleSystem.h"
 #include "BreakableComponent.generated.h"
 
 // 파괴에 필요한 도구 타입
@@ -78,11 +80,11 @@ public:
     // ===== 상태 임계값 =====
 
     // Damaged 상태 전환 HP 비율
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Thresholds")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Thresholds", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float DamagedThreshold = 0.7f;
 
     // HeavyDamaged 상태 전환 HP 비율
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Thresholds")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Thresholds", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float HeavyDamagedThreshold = 0.3f;
 
     // ===== 파괴 설정 =====
@@ -92,7 +94,7 @@ public:
     bool bAllowPassthroughWhenBroken = true;
 
     // 파괴 후 자동 제거 시간 (0이면 제거 안 함)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Destruction")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Destruction", meta = (ClampMin = "0.0"))
     float DestroyAfterBrokenDelay = 0.f;
 
     // ===== VFX/SFX =====
@@ -111,6 +113,30 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "Breakable|VFX")
     TObjectPtr<UParticleSystem> BreakParticle;
+
+    // ===== One-shot / Pitch Randomize =====
+
+    // 도끼(Axe)로 타격 시, HitSound를 one-shot으로 재생 + 랜덤 피치 적용 여부
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot")
+    bool bAxeHitOneShotRandomPitch = true;
+
+    // 도끼 타격 시 피치 범위
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot", meta = (EditCondition = "bAxeHitOneShotRandomPitch", ClampMin = "0.1"))
+    float AxeHitPitchMin = 0.92f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot", meta = (EditCondition = "bAxeHitOneShotRandomPitch", ClampMin = "0.1"))
+    float AxeHitPitchMax = 1.08f;
+
+    // 파괴 시 BreakSound를 one-shot으로 재생 + 랜덤 피치 적용 여부
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot")
+    bool bBreakOneShotRandomPitch = false;
+
+    // 파괴 사운드 피치 범위
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot", meta = (EditCondition = "bBreakOneShotRandomPitch", ClampMin = "0.1"))
+    float BreakPitchMin = 0.95f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breakable|Audio|OneShot", meta = (EditCondition = "bBreakOneShotRandomPitch", ClampMin = "0.1"))
+    float BreakPitchMax = 1.05f;
 
     // ===== 델리게이트 =====
 
@@ -156,6 +182,13 @@ private:
     void UpdateBreakState();
     void SetBreakState(EBreakableState NewState);
     void ExecuteBreak(FVector HitLocation);
-    void PlayHitEffects(FVector Location, FVector Normal);
+    void PlayHitEffects(EBreakToolType ToolUsed, FVector Location, FVector Normal);
     void PlayBreakEffects(FVector Location);
+
+    float GetRandomPitch(float MinPitch, float MaxPitch) const;
+
+private:
+    // 중복 파괴/중복 사운드 방지
+    UPROPERTY(VisibleInstanceOnly, Category = "Breakable|Runtime")
+    bool bHasBroken = false;
 };
