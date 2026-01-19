@@ -4,6 +4,7 @@
 #include "FireballActor.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogPressureVessel, Log, All);
 
@@ -80,6 +81,8 @@ void UPressureVesselComponent::EnsureComponentsCreated()
             {
                 SafetyValveAudioComp->SetSound(SafetyValveSound);
             }
+            // 초기 피치는 최소값으로 설정
+            SafetyValveAudioComp->SetPitchMultiplier(SafetyValvePitchMin);
         }
     }
 
@@ -200,6 +203,7 @@ void UPressureVesselComponent::UpdateSafetyValve(float DeltaTime)
             0.f, 1.f
         );
 
+        // 파티클
         if (IsValid(SafetyValvePSC))
         {
             if (!SafetyValvePSC->IsActive())
@@ -209,9 +213,38 @@ void UPressureVesselComponent::UpdateSafetyValve(float DeltaTime)
             SafetyValvePSC->SetFloatParameter(TEXT("VentStrength"), SafetyValveVentStrength01);
         }
 
-        if (IsValid(SafetyValveAudioComp) && !SafetyValveAudioComp->IsPlaying())
+        // 오디오: 가스 누출 루프 & 피치 업데이트
+        if (IsValid(SafetyValveAudioComp))
         {
-            SafetyValveAudioComp->Play();
+            if (!SafetyValveAudioComp->IsPlaying())
+            {
+                SafetyValveAudioComp->Play();
+            }
+
+            // 전체 압력 비율 0~1 (BLEVE 직전 1.0)
+            const float PressureRatio = GetPressureRatio01();
+
+            // 기본 선형 피치
+            float TargetPitch = FMath::Lerp(SafetyValvePitchMin, SafetyValvePitchMax, PressureRatio);
+
+            // RapidIncreaseStartRatio 이후에는 지수 가중으로 급상승
+            if (PressureRatio > SafetyValveRapidIncreaseStartRatio)
+            {
+                const float ExtraAlpha = (PressureRatio - SafetyValveRapidIncreaseStartRatio) /
+                    (1.0f - SafetyValveRapidIncreaseStartRatio);
+                const float Boost = FMath::Clamp(FMath::Pow(ExtraAlpha, 2.0f), 0.0f, 1.0f);
+                TargetPitch = FMath::Lerp(TargetPitch, SafetyValvePitchMax, Boost);
+            }
+
+            const float CurrentPitch = SafetyValveAudioComp->PitchMultiplier;
+            const float NewPitch = FMath::FInterpTo(
+                CurrentPitch,
+                TargetPitch,
+                DeltaTime,
+                SafetyValvePitchInterpSpeed
+            );
+
+            SafetyValveAudioComp->SetPitchMultiplier(NewPitch);
         }
 
         OnSafetyValveVenting.Broadcast(SafetyValveVentStrength01);
@@ -227,7 +260,7 @@ void UPressureVesselComponent::UpdateSafetyValve(float DeltaTime)
 
         if (IsValid(SafetyValveAudioComp) && SafetyValveAudioComp->IsPlaying())
         {
-            SafetyValveAudioComp->FadeOut(0.5f, 0.f);
+            SafetyValveAudioComp->FadeOut(0.25f, 0.f);
         }
     }
 }
@@ -306,7 +339,10 @@ void UPressureVesselComponent::CheckBLEVECondition()
     }
     else if (WallTemperature >= WallWeakeningTemp && InternalPressure >= CriticalPressure)
     {
-        const float WeakenedBurst = BurstPressure * (1.f - (WallTemperature - WallWeakeningTemp) / 400.f);
+        const float WeakenedBurst = BurstPressure * (WallTemperature - WallWeakeningTemp >= 0.f
+            ? (1.f - (WallTemperature - WallWeakeningTemp) / 400.f)
+            : 1.f);
+
         if (InternalPressure >= WeakenedBurst)
         {
             bShouldRupture = true;
@@ -332,6 +368,12 @@ void UPressureVesselComponent::ExecuteBLEVE()
 
     UE_LOG(LogPressureVessel, Error, TEXT("[Vessel] ====== BLEVE EXPLOSION ====== Location=%s Pressure=%.1f WallTemp=%.1f"),
         *ExplosionLoc.ToString(), InternalPressure, WallTemperature);
+
+    // 폭발 원샷 사운드
+    if (ExplosionSound)
+    {
+        UGameplayStatics::PlaySoundAtLocation(this, ExplosionSound, ExplosionLoc);
+    }
 
     const float FuelMassKg = VesselCapacityLiters * LiquidFillLevel01 * 0.5f;
     const float FireballDiameter = 5.8f * FMath::Pow(FuelMassKg, 0.333f) * FireballRadiusMultiplier;

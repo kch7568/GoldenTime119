@@ -5,12 +5,14 @@
 #include "FireActor.h"
 #include "RoomActor.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/AudioComponent.h"
+#include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGasTank, Log, All);
 
 AGasTankActor::AGasTankActor()
 {
-    PrimaryActorTick.bCanEverTick = false;
+    PrimaryActorTick.bCanEverTick = true; // 누출 피치 업데이트용
 
     Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
     SetRootComponent(Root);
@@ -24,6 +26,13 @@ AGasTankActor::AGasTankActor()
     Combustible->Fuel.FuelInitial = 5.f;
 
     PressureVessel = CreateDefaultSubobject<UPressureVesselComponent>(TEXT("PressureVessel"));
+
+    // ===== Audio Component 생성 =====
+    GasLeakAudioComponent = CreateDefaultSubobject<UAudioComponent>(TEXT("GasLeakAudio"));
+    GasLeakAudioComponent->SetupAttachment(Root);
+    GasLeakAudioComponent->bAutoActivate = false;
+    GasLeakAudioComponent->bAutoDestroy = false;
+    GasLeakAudioComponent->SetPitchMultiplier(GasLeakPitchMin);
 }
 
 void AGasTankActor::BeginPlay()
@@ -39,6 +48,13 @@ void AGasTankActor::BeginPlay()
 
     UE_LOG(LogGasTank, Warning, TEXT("[GasTank] BeginPlay: %s Type=%d"),
         *GetName(), (int32)TankType);
+}
+
+void AGasTankActor::Tick(float DeltaSeconds)
+{
+    Super::Tick(DeltaSeconds);
+
+    UpdateGasLeakAudio(DeltaSeconds);
 }
 
 void AGasTankActor::ApplyTankTypeParameters()
@@ -105,6 +121,60 @@ void AGasTankActor::ApplyTankTypeParameters()
         (int32)TankType, PressureVessel->VesselCapacityLiters, PressureVessel->BurstPressure);
 }
 
+// ===== 가스 누출 오디오 업데이트 =====
+void AGasTankActor::UpdateGasLeakAudio(float DeltaSeconds)
+{
+    if (!IsValid(PressureVessel) || !IsValid(GasLeakAudioComponent))
+    {
+        return;
+    }
+
+    const bool bLeakState =
+        (PressureVessel->VesselState == EPressureVesselState::Venting) ||
+        (PressureVessel->VesselState == EPressureVesselState::Critical);
+
+    if (!bLeakState)
+    {
+        if (GasLeakAudioComponent->IsPlaying())
+        {
+            GasLeakAudioComponent->FadeOut(0.25f, 0.0f);
+            UE_LOG(LogGasTank, Verbose, TEXT("[GasTank] Leak stop: %s"), *GetName());
+        }
+        return;
+    }
+
+    // 누출 상태일 때 재생 시작
+    if (!GasLeakAudioComponent->IsPlaying())
+    {
+        if (GasLeakSound)
+        {
+            GasLeakAudioComponent->SetSound(GasLeakSound);
+        }
+        GasLeakAudioComponent->SetPitchMultiplier(GasLeakPitchMin);
+        GasLeakAudioComponent->Play();
+        UE_LOG(LogGasTank, Verbose, TEXT("[GasTank] Leak start: %s"), *GetName());
+    }
+
+    // 압력 비율 기반 피치 계산 (0.0 ~ 1.0)
+    const float Ratio = FMath::Clamp(PressureVessel->GetPressureRatio01(), 0.0f, 1.0f);
+
+    // 기본 선형 보간
+    float TargetPitch = FMath::Lerp(GasLeakPitchMin, GasLeakPitchMax, Ratio);
+
+    // 폭발 직전 급격한 상승 가중
+    if (Ratio > GasLeakRapidIncreaseStartRatio)
+    {
+        const float ExtraAlpha = (Ratio - GasLeakRapidIncreaseStartRatio) / (1.0f - GasLeakRapidIncreaseStartRatio);
+        // 급가속 느낌을 주기 위해 지수 가중
+        const float Boost = FMath::Clamp(FMath::Pow(ExtraAlpha, 2.0f), 0.0f, 1.0f);
+        TargetPitch = FMath::Lerp(TargetPitch, GasLeakPitchMax, Boost);
+    }
+
+    const float CurrentPitch = GasLeakAudioComponent->PitchMultiplier;
+    const float NewPitch = FMath::FInterpTo(CurrentPitch, TargetPitch, DeltaSeconds, GasLeakPitchInterpSpeed);
+    GasLeakAudioComponent->SetPitchMultiplier(NewPitch);
+}
+
 void AGasTankActor::OnBLEVETriggered(FVector ExplosionLocation)
 {
     if (bHasExploded)
@@ -114,6 +184,18 @@ void AGasTankActor::OnBLEVETriggered(FVector ExplosionLocation)
 
     UE_LOG(LogGasTank, Error, TEXT("[GasTank] ====== BLEVE! ====== %s at %s"),
         *GetName(), *ExplosionLocation.ToString());
+
+    // 누출 루프 정지
+    if (IsValid(GasLeakAudioComponent) && GasLeakAudioComponent->IsPlaying())
+    {
+        GasLeakAudioComponent->Stop();
+    }
+
+    // 폭발 사운드 재생 (원샷)
+    if (ExplosionSound)
+    {
+        UGameplayStatics::PlaySoundAtLocation(this, ExplosionSound, ExplosionLocation);
+    }
 
     // 1) 탱크 메시 즉시 숨기기
     if (IsValid(TankMesh))

@@ -130,7 +130,7 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "Vessel|Events")
     FOnSafetyValveVenting OnSafetyValveVenting;
 
-    // ===== VFX/SFX =====
+    // ===== VFX/SFX 기본 자원 =====
 
     UPROPERTY(EditAnywhere, Category = "Vessel|VFX")
     TObjectPtr<UParticleSystem> SafetyValveVentTemplate;
@@ -140,6 +140,29 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "Vessel|Audio")
     TObjectPtr<USoundBase> CriticalWarningSound;
+
+    // ===== Audio: Safety Valve Hiss Pitch Control =====
+
+    // 누출음 최소 피치 (초기 상태)
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Audio|SafetyValve")
+    float SafetyValvePitchMin = 0.0f;
+
+    // 압력 비율 1.0에서의 최대 피치
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Audio|SafetyValve")
+    float SafetyValvePitchMax = 2.0f;
+
+    // 이 비율 이후부터 피치가 급격히 증가 (폭발 직전 느낌)
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Audio|SafetyValve")
+    float SafetyValveRapidIncreaseStartRatio = 0.8f;
+
+    // 피치 보간 속도
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Audio|SafetyValve")
+    float SafetyValvePitchInterpSpeed = 6.0f;
+
+    // ===== Audio: BLEVE Explosion OneShot =====
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Audio|Explosion")
+    TObjectPtr<USoundBase> ExplosionSound;
 
     // ===== 함수 =====
 
